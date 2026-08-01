@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "codegraph": {
+      "type": "stdio",
+      "command": "codegraph",
+      "args": [
+        "serve",
+        "--mcp",
+        "--path",
+        "/Users/ducduong/Desktop/temp/RemoteSwitchPico/remote-switch-pico"
+      ]
+    }
+  }
+}

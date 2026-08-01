@@ -1,0 +1,60 @@
+{
+    "_meta": {
+        "hash": {
+            "sha256": "2ae7103aa9b216ffddd7e203e376eadf42cddab5248690ff7256eeb3b1037dd2"
+        },
+        "pipfile-spec": 6,
+        "requires": {
+            "python_version": "3.11"
+        },
+        "sources": [
+            {
+                "name": "pypi",
+                "url": "https://pypi.org/simple",
+                "verify_ssl": true
+            }
+        ]
+    },
+    "default": {},
+    "develop": {
+        "micropython-rp2-rpi-pico2-w-stubs": {
+            "hashes": [
+                "sha256:57713fda3f9124a4510e363d26dd9c3fe8ee359a19a210ecaf2690b9058eafcb",
+                "sha256:da2f89c1da2a125ebf1844e5e25bd5ae7c161b12f2fde96a8595ba090e146a9f"
+            ],
+            "index": "pypi",
+            "version": "==1.28.0.post4"
+        },
+        "micropython-stdlib-stubs": {
+            "hashes": [
+                "sha256:b0a707f852365f03792b23964b48a0304cbb18eecc1b743e0d5b96712b775909"
+            ],
+            "markers": "python_version >= '3.7'",
+            "version": "==1.28.0.post6"
+        },
+        "mpremote": {
+            "hashes": [
+                "sha256:2df2a50f3c8098cae8c732dbf2541e7e58185e7896513b45d05196901e049334",
+                "sha256:fdb5626be83dff4e53c0184f8950814cb519b524dba7f1f8b1668aa477257a31"
+            ],
+            "index": "pypi",
+            "markers": "python_version >= '3.4'",
+            "version": "==1.28.0"
+        },
+        "platformdirs": {
+            "hashes": [
+                "sha256:0e4eff26be2d75293977f7cddc153fd9b8eaa7fb0c7b64ffe4076cb443117443",
+                "sha256:ceab4084426fe6319ce18e86deada8ab1b7487c7aee7040c55e277c9ae793695"
+            ],
+            "markers": "python_version >= '3.10'",
+            "version": "==4.10.1"
+        },
+        "pyserial": {
+            "hashes": [
+                "sha256:3c77e014170dfffbd816e6ffc205e9842efb10be9f58ec16d3e8675b4925cddb",
+                "sha256:c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0"
+            ],
+            "version": "==3.5"
+        }
+    }
+}

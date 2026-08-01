@@ -1,0 +1,23 @@
+# Secrets — Wi-Fi credentials, merged into settings.json at deploy time
+.env
+
+# Web app build output (deploy.sh regenerates it from web/)
+www/
+
+# Runtime state written by the device itself
+state.json
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local tooling / editor state
+.codegraph/
+.claude/settings.local.json
+
+# macOS
+.DS_Store

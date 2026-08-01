@@ -1,0 +1,51 @@
+{
+    "python.languageServer": "Pylance",
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportMissingModuleSource": "none"
+    },
+    "python.terminal.activateEnvironment": false,
+    "micropico.openOnStart": false,
+    "python.defaultInterpreterPath": "/Users/ducduong/.local/share/virtualenvs/remote-switch-pico-JYJ2nf0E/bin/python",
+    "python.analysis.typeshedPaths": [
+        "~/.micropico-stubs/included"
+    ],
+    "python.analysis.extraPaths": [
+        "~/.micropico-stubs/included",
+        "/Users/ducduong/.local/share/virtualenvs/remote-switch-pico-JYJ2nf0E/lib/python3.11/site-packages"
+    ],
+    "micropico.syncFileTypes": [
+        "py",
+        "txt",
+        "log",
+        "json",
+        "xml",
+        "html",
+        "js",
+        "mjs",
+        "css",
+        "svg",
+        "ico",
+        "png",
+        "jpg",
+        "woff",
+        "woff2",
+        "map",
+        "gz"
+    ],
+    "micropico.pyIgnore": [
+        "**/.git/**",
+        "**/.vscode/**",
+        "**/.claude/**",
+        "web",
+        "web/**",
+        "**/node_modules/**",
+        "Pipfile",
+        "Pipfile.lock",
+        "deploy.sh",
+        "scan.sh",
+        ".venv",
+        ".venv/**"
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:system"
+}

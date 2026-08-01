@@ -1,0 +1,193 @@
+@import "tailwindcss";
+
+/* ============================================================================
+   Semantic theme tokens
+   ----------------------------------------------------------------------------
+   Components use semantic utilities (bg-card, text-muted, bg-primary, …) whose
+   values are the --tk-* custom properties below. Those are re-defined per
+   [data-mode] / [data-palette] on <html>, so the whole UI re-themes with no
+   component changes. Background patterns key off [data-bg].
+   Defaults on :root == today's dark + emerald look (so "no attributes" is a
+   no-op visual change).
+   ========================================================================== */
+@theme {
+  --color-bgfrom: var(--tk-bgfrom);
+  --color-bgvia:  var(--tk-bgvia);
+  --color-bgto:   var(--tk-bgto);
+  --color-card:   var(--tk-card);
+  --color-inset:  var(--tk-inset);
+  --color-field:  var(--tk-field);
+  --color-track:  var(--tk-track);
+  --color-raised: var(--tk-raised);
+  --color-line:   var(--tk-line);
+  --color-fieldln:var(--tk-fieldln);
+  --color-strong: var(--tk-strong);
+  --color-body:   var(--tk-body);
+  --color-muted:  var(--tk-muted);
+  --color-faint:  var(--tk-faint);
+  --color-primary:      var(--tk-primary);
+  --color-primaryhover: var(--tk-primaryhover);
+  --color-onprimary:    var(--tk-onprimary);
+  --color-success: var(--tk-success);
+  --color-warn:    var(--tk-warn);
+  --color-info:    var(--tk-info);
+  --color-danger:  var(--tk-danger);
+  --color-morse:   var(--tk-morse);
+}
+
+:root,
+:root[data-mode="dark"] {
+  --tk-bgfrom:#020617; --tk-bgvia:#0f172a; --tk-bgto:#020617;
+  --tk-card:rgba(30,41,59,.45); --tk-inset:rgba(15,23,42,.5); --tk-field:rgba(15,23,42,.6);
+  --tk-track:rgba(71,85,105,.55); --tk-raised:#334155;
+  --tk-line:rgba(71,85,105,.55); --tk-fieldln:#475569;
+  --tk-strong:#f1f5f9; --tk-body:#cbd5e1; --tk-muted:#94a3b8; --tk-faint:#64748b;
+  --tk-success:#34d399; --tk-warn:#fbbf24; --tk-info:#38bdf8; --tk-danger:#fb7185; --tk-morse:#a78bfa;
+  --tk-primary:#10b981; --tk-primaryhover:#34d399; --tk-onprimary:#06131f;
+  --tk-logo-a:#10b981; --tk-logo-b:#0d9488;
+  --tk-shadow:0 10px 30px -12px rgba(0,0,0,.5);
+  --tk-font:var(--font-sans);
+}
+:root[data-mode="light"] {
+  --tk-bgfrom:#f8fafc; --tk-bgvia:#ffffff; --tk-bgto:#eef2f6;
+  --tk-card:#ffffff; --tk-inset:#f8fafc; --tk-field:#ffffff;
+  --tk-track:#e2e8f0; --tk-raised:#e2e8f0;
+  --tk-line:#e2e8f0; --tk-fieldln:#cbd5e1;
+  --tk-strong:#0f172a; --tk-body:#334155; --tk-muted:#64748b; --tk-faint:#94a3b8;
+  --tk-success:#059669; --tk-warn:#d97706; --tk-info:#0284c7; --tk-danger:#e11d48; --tk-morse:#7c3aed;
+  --tk-primary:#059669; --tk-primaryhover:#10b981; --tk-onprimary:#ffffff;
+  --tk-logo-a:#10b981; --tk-logo-b:#0d9488;
+  --tk-shadow:0 1px 3px rgba(15,23,42,.08),0 8px 24px -12px rgba(15,23,42,.12);
+  --tk-font:var(--font-sans);
+}
+
+/* ---- accent family (a–d): calm slate surfaces, primary colour only ---- */
+:root[data-palette="a"][data-mode="dark"]  { --tk-primary:#10b981; --tk-primaryhover:#34d399; --tk-onprimary:#06131f; --tk-logo-a:#10b981; --tk-logo-b:#0d9488; }
+:root[data-palette="a"][data-mode="light"] { --tk-primary:#059669; --tk-primaryhover:#10b981; --tk-onprimary:#fff;     --tk-logo-a:#10b981; --tk-logo-b:#0d9488; }
+:root[data-palette="b"][data-mode="dark"]  { --tk-primary:#6366f1; --tk-primaryhover:#818cf8; --tk-onprimary:#0b1020; --tk-logo-a:#6366f1; --tk-logo-b:#7c3aed; }
+:root[data-palette="b"][data-mode="light"] { --tk-primary:#4f46e5; --tk-primaryhover:#6366f1; --tk-onprimary:#fff;     --tk-logo-a:#6366f1; --tk-logo-b:#7c3aed; }
+:root[data-palette="c"][data-mode="dark"]  { --tk-primary:#06b6d4; --tk-primaryhover:#22d3ee; --tk-onprimary:#04141a; --tk-logo-a:#06b6d4; --tk-logo-b:#0284c7; }
+:root[data-palette="c"][data-mode="light"] { --tk-primary:#0891b2; --tk-primaryhover:#06b6d4; --tk-onprimary:#fff;     --tk-logo-a:#06b6d4; --tk-logo-b:#0284c7; }
+:root[data-palette="d"][data-mode="dark"]  { --tk-primary:#8b5cf6; --tk-primaryhover:#a78bfa; --tk-onprimary:#100a20; --tk-logo-a:#8b5cf6; --tk-logo-b:#d946ef; }
+:root[data-palette="d"][data-mode="light"] { --tk-primary:#7c3aed; --tk-primaryhover:#8b5cf6; --tk-onprimary:#fff;     --tk-logo-a:#8b5cf6; --tk-logo-b:#d946ef; }
+
+/* ---- dramatic full re-skins (e–h) ---- */
+:root[data-palette="e"][data-mode="dark"] {   /* Midnight — stark OLED */
+  --tk-bgfrom:#000; --tk-bgvia:#050506; --tk-bgto:#000;
+  --tk-card:#0c0c0f; --tk-inset:#141418; --tk-field:#141418;
+  --tk-track:#232329; --tk-raised:#232329; --tk-line:#232329; --tk-fieldln:#33333c;
+  --tk-strong:#fafafa; --tk-body:#d4d4d8; --tk-muted:#8b8b93; --tk-faint:#57575e;
+  --tk-success:#22c55e; --tk-warn:#f59e0b; --tk-info:#38bdf8; --tk-danger:#ef4444; --tk-morse:#a78bfa;
+  --tk-primary:#3b82f6; --tk-primaryhover:#60a5fa; --tk-onprimary:#00060f;
+  --tk-logo-a:#3b82f6; --tk-logo-b:#2563eb; --tk-shadow:0 0 0 1px rgba(255,255,255,.02);
+}
+:root[data-palette="e"][data-mode="light"] {
+  --tk-bgfrom:#fff; --tk-bgvia:#fafafa; --tk-bgto:#f4f4f5;
+  --tk-card:#fff; --tk-inset:#fafafa; --tk-field:#fff;
+  --tk-track:#e4e4e7; --tk-raised:#e4e4e7; --tk-line:#e4e4e7; --tk-fieldln:#d4d4d8;
+  --tk-strong:#09090b; --tk-body:#3f3f46; --tk-muted:#71717a; --tk-faint:#a1a1aa;
+  --tk-success:#16a34a; --tk-warn:#d97706; --tk-info:#0284c7; --tk-danger:#dc2626; --tk-morse:#7c3aed;
+  --tk-primary:#2563eb; --tk-primaryhover:#3b82f6; --tk-onprimary:#fff;
+  --tk-logo-a:#3b82f6; --tk-logo-b:#2563eb; --tk-shadow:0 1px 2px rgba(0,0,0,.06);
+}
+:root[data-palette="f"][data-mode="dark"] {   /* Ember — warm stone */
+  --tk-bgfrom:#1c1917; --tk-bgvia:#0c0a09; --tk-bgto:#1c1917;
+  --tk-card:rgba(41,37,36,.55); --tk-inset:rgba(28,25,23,.6); --tk-field:rgba(28,25,23,.6);
+  --tk-track:rgba(87,83,78,.5); --tk-raised:#44403c; --tk-line:rgba(87,83,78,.5); --tk-fieldln:#57534e;
+  --tk-strong:#fafaf9; --tk-body:#e7e5e4; --tk-muted:#a8a29e; --tk-faint:#78716c;
+  --tk-success:#34d399; --tk-warn:#facc15; --tk-info:#38bdf8; --tk-danger:#fb7185; --tk-morse:#c084fc;
+  --tk-primary:#f97316; --tk-primaryhover:#fb923c; --tk-onprimary:#1a0d02;
+  --tk-logo-a:#fb923c; --tk-logo-b:#f97316; --tk-shadow:0 10px 30px -12px rgba(0,0,0,.6);
+}
+:root[data-palette="f"][data-mode="light"] {
+  --tk-bgfrom:#faf8f5; --tk-bgvia:#fffdf9; --tk-bgto:#f5f0e8;
+  --tk-card:#fffefb; --tk-inset:#faf6ef; --tk-field:#fffefb;
+  --tk-track:#e7e0d4; --tk-raised:#e7e0d4; --tk-line:#e7e0d4; --tk-fieldln:#d6cdbd;
+  --tk-strong:#1c1917; --tk-body:#44403c; --tk-muted:#78716c; --tk-faint:#a8a29e;
+  --tk-success:#059669; --tk-warn:#ca8a04; --tk-info:#0284c7; --tk-danger:#e11d48; --tk-morse:#9333ea;
+  --tk-primary:#ea580c; --tk-primaryhover:#f97316; --tk-onprimary:#fff;
+  --tk-logo-a:#fb923c; --tk-logo-b:#f97316; --tk-shadow:0 1px 3px rgba(120,80,20,.07),0 8px 24px -12px rgba(120,80,20,.12);
+}
+:root[data-palette="g"][data-mode="dark"] {   /* Terminal — phosphor */
+  --tk-bgfrom:#0a0f0a; --tk-bgvia:#050805; --tk-bgto:#0a0f0a;
+  --tk-card:rgba(16,26,16,.6); --tk-inset:rgba(8,16,8,.7); --tk-field:rgba(8,16,8,.7);
+  --tk-track:rgba(34,64,34,.5); --tk-raised:#1f3d1f; --tk-line:rgba(34,64,34,.6); --tk-fieldln:#1f3d1f;
+  --tk-strong:#dcffdc; --tk-body:#8fdf8f; --tk-muted:#5a9a5a; --tk-faint:#3d6b3d;
+  --tk-success:#4ade80; --tk-warn:#fde047; --tk-info:#5eead4; --tk-danger:#f87171; --tk-morse:#c4b5fd;
+  --tk-primary:#22c55e; --tk-primaryhover:#4ade80; --tk-onprimary:#021403;
+  --tk-logo-a:#22c55e; --tk-logo-b:#15803d; --tk-shadow:0 0 24px -8px rgba(34,197,94,.22);
+  --tk-font:var(--font-mono);
+}
+:root[data-palette="g"][data-mode="light"] {
+  --tk-bgfrom:#f4f7f0; --tk-bgvia:#fbfdf7; --tk-bgto:#eef3e6;
+  --tk-card:#fbfdf7; --tk-inset:#f2f7ea; --tk-field:#fbfdf7;
+  --tk-track:#dbe8cd; --tk-raised:#dbe8cd; --tk-line:#d7e4c9; --tk-fieldln:#c2d4ae;
+  --tk-strong:#14300f; --tk-body:#2f5a28; --tk-muted:#5a7a50; --tk-faint:#8aa47e;
+  --tk-success:#16a34a; --tk-warn:#ca8a04; --tk-info:#0891b2; --tk-danger:#dc2626; --tk-morse:#7c3aed;
+  --tk-primary:#15803d; --tk-primaryhover:#16a34a; --tk-onprimary:#fff;
+  --tk-logo-a:#22c55e; --tk-logo-b:#15803d; --tk-shadow:0 1px 3px rgba(40,80,20,.07);
+  --tk-font:var(--font-mono);
+}
+:root[data-palette="h"][data-mode="dark"] {   /* Synthwave — neon */
+  --tk-bgfrom:#1a0b2e; --tk-bgvia:#0f0620; --tk-bgto:#1a0b2e;
+  --tk-card:rgba(46,16,74,.5); --tk-inset:rgba(24,10,42,.6); --tk-field:rgba(24,10,42,.65);
+  --tk-track:rgba(109,40,217,.35); --tk-raised:#5b21b6; --tk-line:rgba(124,58,237,.35); --tk-fieldln:#5b21b6;
+  --tk-strong:#fdf4ff; --tk-body:#e9d5ff; --tk-muted:#b794d6; --tk-faint:#8b6bb0;
+  --tk-success:#34d399; --tk-warn:#fbbf24; --tk-info:#22d3ee; --tk-danger:#fb7185; --tk-morse:#c084fc;
+  --tk-primary:#ec4899; --tk-primaryhover:#f472b6; --tk-onprimary:#1a0413;
+  --tk-logo-a:#ec4899; --tk-logo-b:#8b5cf6; --tk-shadow:0 0 30px -10px rgba(236,72,153,.35);
+}
+:root[data-palette="h"][data-mode="light"] {
+  --tk-bgfrom:#faf5ff; --tk-bgvia:#fdf4ff; --tk-bgto:#f3e8ff;
+  --tk-card:#fffbff; --tk-inset:#faf2fd; --tk-field:#fffbff;
+  --tk-track:#ecd9f5; --tk-raised:#ecd9f5; --tk-line:#ecd9f5; --tk-fieldln:#d8b4fe;
+  --tk-strong:#3b0764; --tk-body:#6b21a8; --tk-muted:#9333ea; --tk-faint:#a855f7;
+  --tk-success:#059669; --tk-warn:#d97706; --tk-info:#0891b2; --tk-danger:#e11d48; --tk-morse:#9333ea;
+  --tk-primary:#db2777; --tk-primaryhover:#ec4899; --tk-onprimary:#fff;
+  --tk-logo-a:#ec4899; --tk-logo-b:#8b5cf6; --tk-shadow:0 1px 3px rgba(147,51,234,.08),0 8px 24px -12px rgba(147,51,234,.15);
+}
+
+/* ============================================================================
+   App background + pattern layer
+   ========================================================================== */
+@layer base {
+  body { background: var(--tk-bgvia); }
+  .app-bg {
+    position: relative;
+    min-height: 100vh;
+    font-family: var(--tk-font, var(--font-sans));
+    background: linear-gradient(to bottom, var(--tk-bgfrom), var(--tk-bgvia) 42%, var(--tk-bgto));
+  }
+  .app-bg > * { position: relative; z-index: 1; }
+  .app-bg::before {
+    content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    --pat-line: color-mix(in srgb, var(--tk-faint) 42%, transparent);
+    background-image: var(--pat, none);
+    background-size: var(--pat-size, auto);
+  }
+  .theme-shadow { box-shadow: var(--tk-shadow); }
+  .theme-logo { background: linear-gradient(135deg, var(--tk-logo-a), var(--tk-logo-b)); }
+}
+
+/* gradient-based patterns */
+:root[data-bg="dots"]     .app-bg::before { --pat: radial-gradient(var(--pat-line) 1px, transparent 1.4px); --pat-size: 22px 22px; }
+:root[data-bg="grid"]     .app-bg::before { --pat: linear-gradient(var(--pat-line) 1px, transparent 1px), linear-gradient(90deg, var(--pat-line) 1px, transparent 1px); --pat-size: 30px 30px; }
+:root[data-bg="diagonal"] .app-bg::before { --pat: repeating-linear-gradient(45deg, var(--pat-line) 0 1px, transparent 1px 11px); }
+:root[data-bg="grain"]    .app-bg::before { --pat: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E"); opacity:.35; mix-blend-mode: overlay; }
+:root[data-bg="glow"]     .app-bg::before { --pat: radial-gradient(60% 45% at 15% 8%, color-mix(in srgb, var(--tk-primary) 16%, transparent), transparent 70%), radial-gradient(55% 40% at 92% 22%, color-mix(in srgb, var(--tk-info) 14%, transparent), transparent 70%); }
+
+/* technical icon patterns: theme colour revealed through an SVG mask */
+:root[data-bg="circuit"] .app-bg::before,
+:root[data-bg="cpu"]     .app-bg::before,
+:root[data-bg="pi"]      .app-bg::before,
+:root[data-bg="bot"]     .app-bg::before,
+:root[data-bg="waves"]   .app-bg::before { background: var(--pat-line); -webkit-mask: var(--m) 0 0 / var(--ms) repeat; mask: var(--m) 0 0 / var(--ms) repeat; }
+:root[data-bg="circuit"] .app-bg::before { --ms:46px 46px; --m:url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='46' height='46'><g fill='none' stroke='black' stroke-width='1.5'><path d='M0 23H16M30 23H46M23 0V16M23 30V46'/><circle cx='23' cy='23' r='4'/><path d='M8 23V8H23'/></g><circle cx='8' cy='8' r='2' fill='black'/></svg>"); }
+:root[data-bg="cpu"]     .app-bg::before { --ms:50px 50px; --m:url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='50' height='50'><g fill='black'><rect x='18' y='18' width='14' height='14' rx='2'/><rect x='22' y='12' width='2' height='5'/><rect x='26' y='12' width='2' height='5'/><rect x='22' y='33' width='2' height='5'/><rect x='26' y='33' width='2' height='5'/><rect x='12' y='22' width='5' height='2'/><rect x='12' y='26' width='5' height='2'/><rect x='33' y='22' width='5' height='2'/><rect x='33' y='26' width='5' height='2'/></g></svg>"); }
+:root[data-bg="pi"]      .app-bg::before { --ms:42px 42px; --m:url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='42' height='42'><g fill='black'><rect x='13' y='15' width='16' height='3'/><rect x='16' y='18' width='3' height='11'/><rect x='24' y='18' width='3' height='11'/></g></svg>"); }
+:root[data-bg="bot"]     .app-bg::before { --ms:50px 50px; --m:url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='50' height='50'><g fill='none' stroke='black' stroke-width='2'><rect x='16' y='18' width='18' height='15' rx='3'/><line x1='25' y1='13' x2='25' y2='18'/></g><circle cx='25' cy='11' r='2' fill='black'/><circle cx='21' cy='26' r='2' fill='black'/><circle cx='29' cy='26' r='2' fill='black'/></svg>"); }
+:root[data-bg="waves"]   .app-bg::before { --ms:40px 20px; --m:url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='40' height='20'><path d='M0 10Q5 0 10 10T20 10T30 10T40 10' fill='none' stroke='black' stroke-width='1.5'/></svg>"); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .001ms !important; animation-iteration-count: 1 !important; }
+}

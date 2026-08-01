@@ -1,0 +1,34 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+
+[dev-packages]
+# Talk to the Pico over USB (upload/run/repl): `pipenv run mpremote`
+mpremote = "*"
+# Type stubs for the Raspberry Pi Pico 2 W (RP2350) MicroPython firmware,
+# so machine/network/etc. resolve in the editor without the real hardware.
+micropython-rp2-rpi_pico2_w-stubs = "*"
+
+[requires]
+python_version = "3.11"
+
+[scripts]
+# No-device dev mode: web app + mock Pico backend (see web/dev-mock-server.js).
+# Then enter `localhost:5173` in the app's "Pico address" box.
+dev = "npm --prefix web run dev"
+# One command: build web, upload firmware + web, run on the Pico.
+deploy = "bash deploy.sh"
+# Upload only (no run); resets to boot into main.py.
+upload = "bash -c 'NORUN=1 bash deploy.sh'"
+# Open a REPL / view serial output.
+repl = "mpremote repl"
+# List all potentially-connected serial / USB devices (find the Pico).
+scan = "bash scan.sh"
+# Check whether the app fits a target board's storage/RAM (see tools/device_profiles.json).
+#   pipenv run check-device            (default target)
+#   pipenv run check-device --all      (every profile)
+#   pipenv run check-device --probe    (measure the connected board)
+check-device = "python3 tools/check_device_fit.py"

@@ -1,0 +1,61 @@
+{
+  "_meta": {
+    "purpose": "MicroPython target-board profiles for checking whether this app fits a device. Used by tools/check_device_fit.py.",
+    "important": [
+      "flash_mb is the chip's total flash (headline spec). fs_free_kb is the APPROX user-filesystem space left after a stock MicroPython firmware is flashed - that is the number your app's uploaded files actually compete for. It varies by firmware version; treat it as a guide and confirm on-device with os.statvfs('/').",
+      "ram_kb is the chip's total SRAM. heap_free_kb is the APPROX MicroPython free heap after boot - always much smaller than ram_kb on ESP32/ESP8266 because the WiFi stack / IDF reserve most SRAM. RAM fit can only be confirmed on-device with gc.mem_free(); the numbers here are for rough sizing only.",
+      "This app needs WiFi + an asyncio HTTP/WebSocket server, so it is heavier than a blink demo. Boards with heap_free_kb under ~64 are risky."
+    ],
+    "schema": "key -> {name, mcu, ram_kb, heap_free_kb, flash_mb, fs_free_kb, wifi, notes}"
+  },
+
+  "rpi-pico": {
+    "name": "Raspberry Pi Pico", "mcu": "RP2040",
+    "ram_kb": 264, "heap_free_kb": 192, "flash_mb": 2, "fs_free_kb": 1000,
+    "wifi": false,
+    "notes": "No onboard WiFi - this app's networking will not work without an add-on module."
+  },
+  "rpi-pico-w": {
+    "name": "Raspberry Pi Pico W", "mcu": "RP2040 + CYW43",
+    "ram_kb": 264, "heap_free_kb": 166, "flash_mb": 2, "fs_free_kb": 848,
+    "wifi": true,
+    "notes": "WiFi stack reduces free heap vs the non-W Pico."
+  },
+  "rpi-pico2": {
+    "name": "Raspberry Pi Pico 2", "mcu": "RP2350",
+    "ram_kb": 520, "heap_free_kb": 450, "flash_mb": 4, "fs_free_kb": 3500,
+    "wifi": false,
+    "notes": "No onboard WiFi."
+  },
+  "rpi-pico2-w": {
+    "name": "Raspberry Pi Pico 2 W", "mcu": "RP2350 + CYW43",
+    "ram_kb": 520, "heap_free_kb": 430, "flash_mb": 4, "fs_free_kb": 3500,
+    "wifi": true,
+    "notes": "THIS PROJECT'S CURRENT TARGET (see Pipfile stubs). Roomy for this app."
+  },
+
+  "esp32-generic": {
+    "name": "ESP32 (generic, 4MB)", "mcu": "ESP32",
+    "ram_kb": 520, "heap_free_kb": 110, "flash_mb": 4, "fs_free_kb": 2048,
+    "wifi": true,
+    "notes": "520KB SRAM but MicroPython free heap is only ~100-160KB after WiFi init. Doable but tighter than RP2350."
+  },
+  "esp32-s3": {
+    "name": "ESP32-S3 (8MB, no PSRAM)", "mcu": "ESP32-S3",
+    "ram_kb": 512, "heap_free_kb": 200, "flash_mb": 8, "fs_free_kb": 4096,
+    "wifi": true,
+    "notes": "Variants with PSRAM expose multiple MB of heap; without PSRAM expect ~180-260KB."
+  },
+  "esp8266": {
+    "name": "ESP8266 (generic)", "mcu": "ESP8266",
+    "ram_kb": 80, "heap_free_kb": 35, "flash_mb": 4, "fs_free_kb": 2048,
+    "wifi": true,
+    "notes": "~35KB free heap. An asyncio web server + this app is very likely to run out of RAM. Not recommended."
+  },
+  "pyboard-v1.1": {
+    "name": "PyBoard v1.1", "mcu": "STM32F405",
+    "ram_kb": 192, "heap_free_kb": 100, "flash_mb": 1, "fs_free_kb": 96,
+    "wifi": false,
+    "notes": "No WiFi; small internal FS (use an SD card for www/). Flash is tight for the web bundle."
+  }
+}

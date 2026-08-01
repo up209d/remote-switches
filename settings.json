@@ -1,0 +1,33 @@
+{
+  "wifi_ssid": "",
+  "wifi_pass": "",
+  "http_port": 80,
+  "stats_interval_ms": 1000,
+  "poll_timeout_ms": 50,
+  "wifi_timeout_s": 15,
+  "static_ip": "",
+  "subnet_mask": "255.255.255.0",
+  "gateway": "",
+  "dns": "",
+  "default_tick_on_ms": 500,
+  "default_tick_off_ms": 500,
+  "default_morse_message": "SOS",
+  "default_morse_wpm": 10,
+
+  "tunnel": {
+    "enabled": false,
+    "host": "",
+    "port": 7443,
+    "use_tls": true,
+    "server_name": "",
+    "token": "",
+    "device_id": "",
+    "startup_only": true,
+    "connect_timeout_ms": 8000,
+    "reconnect_min_ms": 2000,
+    "reconnect_max_ms": 60000,
+    "keepalive_ms": 20000,
+    "idle_timeout_ms": 60000,
+    "max_streams": 6
+  }
+}
