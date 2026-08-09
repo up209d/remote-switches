@@ -26,64 +26,69 @@ _DEFAULTS = {
     "default_tick_off_ms": 500,
     "default_morse_message": "SOS",
     "default_morse_wpm": 10,
-    # ---- reverse tunnel to a remote relay -------------------------------
-    # The device dials OUT to a relay you run on a server with a fixed IP / DNS
-    # name, so the internet can reach it through NAT. Everything (web app,
-    # static files, WebSocket) keeps being served by this device — the relay is
+    # ---- reverse tunnel to an uptunnel server ---------------------------
+    # The device dials OUT to an uptunnel server you run on a host with a fixed
+    # DNS name, so the internet can reach it through NAT. Everything (web app,
+    # static files, WebSocket) keeps being served by this device — the server is
     # only a pipe. See docs/TUNNEL_PROTOCOL.md.
+    #
+    # server/token/subdomain come from .env at deploy time (UPTUNNEL_SERVER,
+    # UPTUNNEL_TOKEN, UPTUNNEL_SUBDOMAIN); tools/build_settings.py merges them
+    # in, so the committed settings.json never holds the token.
     #
     # Override individual keys in settings.json; any you omit keep the default
     # below (this sub-object is merged key-by-key, not replaced wholesale).
     "tunnel": {
         # Master switch. False = behave exactly as before, no outbound socket.
         "enabled": False,
-        # Relay address. `host` is the fixed IP or DNS name of YOUR server.
-        # This is the port the relay listens on for DEVICES, which is not the
-        # public port browsers use.
-        "host": "",
-        "port": 7443,
-        # Wrap the device->relay hop in TLS. Note MicroPython's ssl defaults to
-        # CERT_NONE: this buys confidentiality, not proof you reached the right
-        # server. `token` is what actually authenticates. Set `server_name` if
-        # SNI must differ from `host` (e.g. connecting by bare IP).
-        "use_tls": True,
-        "server_name": "",
-        # Shared secret sent in the HELLO frame. The relay MUST reject any
-        # device that does not present the expected token.
+        # Control URL of YOUR uptunnel server, e.g.
+        # wss://tunnel.example.com/control. Note MicroPython's ssl defaults to
+        # CERT_NONE, so wss buys confidentiality, not proof you reached the
+        # right server; `token` is what actually authenticates.
+        "server": "",
+        # This device's secret, from the server's tokens.json. The server
+        # rejects any agent that does not present a known token.
         "token": "",
-        # Identity the relay routes by — it becomes the public subdomain. Leave
-        # empty to derive it from machine.unique_id(), so one identical
-        # settings.json can be deployed across a whole fleet and every board
-        # still gets a distinct, stable name.
-        "device_id": "",
+        # The public name to claim: <subdomain>.<the server's HTTP domain>.
+        # The server's token entry decides which subdomains this token may
+        # take. Without one there is nothing to route, so the tunnel stays off.
+        "subdomain": "",
+        # Label shown in the server's logs and /status. Empty derives it from
+        # machine.unique_id(), so one settings.json can go to a whole fleet and
+        # each board is still tellable apart.
+        "name": "",
         # One shot per boot. The connect is blocking, so every attempt freezes
         # the event loop for up to connect_timeout_ms — which also delays the
         # momentary-hold deadman in server/pins.py. With startup_only the device
         # pays that once at boot and then switches the tunnel off for good,
         # behaving exactly like a normal LAN device.
         #
-        # TRADEOFF: nothing reconnects by itself. Restarting the relay, or a
-        # brief network blip, leaves every device unreachable from the internet
-        # until it is power-cycled. Set this to false to get backoff-retry
-        # (reconnect_min_ms/reconnect_max_ms below) at the cost of a recurring
-        # stall whenever the relay is unreachable.
-        "startup_only": True,
-        # How long a blocking connect + TLS handshake may stall the event loop.
-        # Note: DNS resolution is not covered by this, so a literal IP in `host`
-        # is the only way to bound the stall strictly.
+        # Left false by default: uptunnel sessions are meant to be long-lived
+        # and re-established, and a device that goes dark for good after a
+        # server redeploy defeats the point of remote access. The cost is a
+        # recurring stall whenever the server is unreachable, bounded by the
+        # backoff below.
+        "startup_only": False,
+        # How long a blocking connect + TLS + WebSocket handshake may stall the
+        # event loop. Note: DNS resolution is not covered by this.
         "connect_timeout_ms": 8000,
         # Reconnect backoff, doubling from min to max on repeated failure.
         # Only consulted when startup_only is false.
         "reconnect_min_ms": 2000,
         "reconnect_max_ms": 60000,
-        # Send a PING this often; drop and reconnect after this long with no
-        # traffic at all from the relay.
+        # Send a WebSocket ping this often; drop and reconnect after this long
+        # with no traffic at all from the server.
         "keepalive_ms": 20000,
         "idle_timeout_ms": 60000,
         # Concurrent tunnelled client streams. Each costs RAM for its buffers,
         # so this is the knob that stops a busy page load exhausting the heap.
         "max_streams": 6,
+        # RAM ceiling for one inbound frame. Matches the server's own 32KB cap
+        # on an HTTP request head, which is the largest unit it forwards in one
+        # piece; anything bigger drops the connection instead of the heap.
+        "max_frame_bytes": 32768,
     },
+    "gemini_api_key": "api-key"
 }
 
 # Checked in order; first readable one wins. "settings.json" resolves relative
@@ -116,12 +121,13 @@ def _load():
     return values
 
 
-def _device_id(configured):
+def _agent_name(configured):
     """
-    Stable per-board identity, used by the relay as the public subdomain.
+    Stable per-board label, shown in the tunnel server's logs.
 
-    An explicit device_id in settings.json always wins. Otherwise it is derived
-    from the chip's unique id, so a fleet can share one settings.json.
+    An explicit name in settings.json always wins. Otherwise it is derived from
+    the chip's unique id, so a fleet can share one settings.json and still be
+    tellable apart.
     """
     if configured:
         return configured
@@ -152,7 +158,10 @@ DEFAULT_TICK_OFF_MS = _cfg["default_tick_off_ms"]
 DEFAULT_MORSE_MESSAGE = _cfg["default_morse_message"]
 DEFAULT_MORSE_WPM = _cfg["default_morse_wpm"]
 
-# Whole tunnel block, passed to server.tunnel.Tunnel(). device_id is resolved
-# here so every consumer sees the concrete value, never the empty placeholder.
+# Whole tunnel block, passed to server.tunnel.Tunnel(). `name` is resolved here
+# so every consumer sees the concrete value, never the empty placeholder.
 TUNNEL = _cfg["tunnel"]
-TUNNEL["device_id"] = _device_id(TUNNEL.get("device_id"))
+TUNNEL["name"] = _agent_name(TUNNEL.get("name"))
+
+
+GEMINI_API_KEY = _cfg["gemini_api_key"]

@@ -44,6 +44,70 @@ def encode(data, opcode=OP_TEXT):
     return bytes(frame)
 
 
+def _header(buf):
+    """
+    (payload_offset, payload_len, mask_offset) for the frame at buf[0], or None
+    if the header isn't all there yet. mask_offset is -1 on an unmasked frame.
+    """
+    n = len(buf)
+    if n < 2:
+        return None
+    length = buf[1] & 0x7F
+    offset = 2
+    if length == 126:
+        if n < 4:
+            return None
+        length = (buf[2] << 8) | buf[3]
+        offset = 4
+    elif length == 127:
+        if n < 10:
+            return None
+        length = 0
+        for i in range(2, 10):
+            length = (length << 8) | buf[i]
+        offset = 10
+    mask = -1
+    if buf[1] & 0x80:
+        mask = offset
+        offset += 4
+    return offset, length, mask
+
+
+def frame_len(buf):
+    """
+    Total byte length of the frame at the start of `buf`, or -1 if `buf` doesn't
+    hold all of it yet. Framing arithmetic only — nothing is unmasked or copied.
+
+    server/tunnel.py uses this to tell whether a whole client frame has arrived
+    before handing the stream to decode(), which would otherwise block.
+    """
+    h = _header(buf)
+    if h is None:
+        return -1
+    total = h[0] + h[1]
+    return total if len(buf) >= total else -1
+
+
+def parse_frame(buf):
+    """
+    Decode the frame at the start of `buf`: (fin, opcode, payload, total_len),
+    or None if it isn't complete. The buffer-based twin of decode(), for callers
+    that already hold the bytes instead of a socket to read them from.
+    """
+    h = _header(buf)
+    if h is None:
+        return None
+    offset, length, mask = h
+    total = offset + length
+    if len(buf) < total:
+        return None
+    payload = bytes(buf[offset:total])
+    if mask >= 0 and length:
+        key = buf[mask:mask + 4]
+        payload = bytes(payload[i] ^ key[i % 4] for i in range(length))
+    return bool(buf[0] & 0x80), buf[0] & 0x0F, payload, total
+
+
 def _recv_exact(sock, n):
     """Read exactly n bytes. Returns None on a closed/broken connection."""
     if n == 0:

@@ -1,53 +1,125 @@
 # ==========================================
-# Outbound reverse tunnel to a remote relay
+# Outbound reverse tunnel to an uptunnel server
 # ==========================================
 #
 # Problem: the Pico sits behind NAT on a home LAN, so nothing on the internet
-# can dial in to it. Solution: the Pico dials *out* to a relay you run on a
-# server that has a fixed IP / DNS name, and holds that connection open. The
-# relay fronts a public listener and forwards everything it receives down that
-# already-open socket.
+# can dial in to it. Solution: the Pico dials *out* to an uptunnel server you
+# run on a host with a fixed DNS name, and holds that connection open. The
+# server fronts a public listener at https://<subdomain>.<its domain> and
+# forwards everything it receives down that already-open socket.
 #
 # Nothing about the Pico's own serving changes. A request arriving through the
 # tunnel is handed to exactly the same handlers that serve LAN clients, via a
 # socket-lookalike object (TunnelStream), so the device keeps serving its own
-# web app, its own static files and its own WebSocket. The relay stays a dumb
+# web app, its own static files and its own WebSocket. The server stays a dumb
 # pipe — it holds no UI and knows nothing about /api.
 #
-# Transport: ONE plain-TCP (optionally TLS) connection, framed as
+# Transport: ONE WebSocket to wss://<host>/control carrying binary frames
 #
-#     op:uint8 | stream_id:uint16 big-endian | length:uint16 | payload[length]
+#     type:uint8 | stream_id:uint32 big-endian (types >= 0x20 only) | payload
 #
-# This is deliberately not WebSocket: both ends are our own code, so the
-# handshake, client-side masking and fragmentation rules would be pure
-# overhead. See docs/TUNNEL_PROTOCOL.md for the full wire contract — the relay
-# is written against that document, not against this file.
+# WebSocket already delimits messages, so frames carry no length of their own.
+# This is the fourth implementation of uptunnel wire protocol v1, after the Node
+# server and the Node and Python agents; docs/TUNNEL_PROTOCOL.md is the contract
+# it is written against, not this file.
 
+import json
 import socket
 import time
 
-# ---- frame opcodes (keep in sync with docs/TUNNEL_PROTOCOL.md) -------------
-OP_OPEN = 0x01      # relay -> device: a new client stream begins
-OP_DATA = 0x02      # both ways: payload bytes belonging to a stream
-OP_CLOSE = 0x03     # both ways: this stream is finished
-OP_PING = 0x04      # both ways: keepalive probe
-OP_PONG = 0x05      # both ways: keepalive reply
-OP_FLUSH = 0x06     # relay -> device: buffered bytes now form a complete unit
-OP_HELLO = 0x10     # device -> relay: authenticate + identify
-OP_READY = 0x11     # relay -> device: authentication accepted
+from server import ws_client
+from server import ws_protocol as ws
 
-HEADER_LEN = 5
-MAX_PAYLOAD = 1024          # bounds a single frame, and so bounds our RAM use
-_OUT_FLUSH_AT = 1024        # coalesce small writes into fuller frames
+PROTOCOL_VERSION = 1
+CLIENT_ID = "uptunnel-pico/1"
+
+# ---- frame types (keep in sync with docs/TUNNEL_PROTOCOL.md) ---------------
+HELLO = 0x01        # device -> server: authenticate
+HELLO_OK = 0x02     # server -> device: authenticated
+ERROR = 0x03        # both: something was refused
+OPEN_TUNNEL = 0x10  # device -> server: claim a public subdomain
+TUNNEL_OK = 0x11    # server -> device: subdomain is live
+CLOSE_TUNNEL = 0x12 # device -> server: release a subdomain
+STREAM_OPEN = 0x20  # server -> device: a public client connected
+STREAM_DATA = 0x21  # both: payload bytes for a stream
+STREAM_EOF = 0x22   # both: no more data in this direction
+STREAM_ACK = 0x23   # both: n bytes consumed, credit them back
+STREAM_RESET = 0x24 # both: abort this stream
+
+_STREAM_FLOOR = 0x20        # types below this are connection-level, with no id
+
+_OUT_CHUNK = 1024           # coalesce small writes into fuller frames
+_READ_CHUNK = 1024
+_TX_HIGH_WATER = 4096       # queued bytes past which a writer has to wait
+_TX_STALL_MS = 5000         # ...and how long it waits before we give up
+
+# errnos meaning "not now, try again": EAGAIN, plus mbedtls' WANT_READ and
+# WANT_WRITE, which a non-blocking TLS socket raises mid-record.
+_RETRY = (11, -26880, -26752)
 
 # Connection lifecycle
 _IDLE = 0                   # not connected, waiting out the reconnect backoff
-_UP = 1                     # authenticated and carrying streams
+_AUTH = 1                   # socket up, HELLO sent, waiting for HELLO_OK
+_UP = 2                     # authenticated and carrying streams
 
 
-def _pack(op, sid, payload=b""):
-    return bytes((op, (sid >> 8) & 0xFF, sid & 0xFF,
-                  (len(payload) >> 8) & 0xFF, len(payload) & 0xFF)) + payload
+def _control(frame_type, body):
+    return bytes((frame_type,)) + json.dumps(body).encode()
+
+
+def _stream(frame_type, sid, payload=b""):
+    return bytes((frame_type, (sid >> 24) & 0xFF, (sid >> 16) & 0xFF,
+                  (sid >> 8) & 0xFF, sid & 0xFF)) + payload
+
+
+def _u32(buf, i=0):
+    return (buf[i] << 24) | (buf[i + 1] << 16) | (buf[i + 2] << 8) | buf[i + 3]
+
+
+def _u32b(n):
+    return bytes(((n >> 24) & 0xFF, (n >> 16) & 0xFF, (n >> 8) & 0xFF, n & 0xFF))
+
+
+def _parse_url(url):
+    """(host, port, path, tls) from ws://host[:port][/path] or wss://..."""
+    scheme, _, rest = url.partition("://")
+    if scheme not in ("ws", "wss"):
+        raise ValueError("tunnel.server must start with ws:// or wss://")
+    tls = scheme == "wss"
+    hostport, _, path = rest.partition("/")
+    host, _, port = hostport.partition(":")
+    if not host:
+        raise ValueError("tunnel.server has no host")
+    return host, int(port) if port else (443 if tls else 80), "/" + path, tls
+
+
+def _request_complete(buf):
+    """
+    Has a whole HTTP request landed in `buf` — head, blank line, and all of the
+    body Content-Length promises?
+
+    This is the load-bearing check. The device is single-threaded, so a handler
+    that blocked waiting for more bytes would have to pump the tunnel socket
+    from inside itself. Instead nothing is dispatched until everything the
+    handler will read is already in memory, and recv() never blocks.
+
+    Chunked request bodies are not recognised (browsers don't use them for the
+    small JSON bodies /api takes); such a request simply waits for its EOF.
+    """
+    end = buf.find(b"\r\n\r\n")
+    if end < 0:
+        return False
+    head = bytes(buf[:end]).lower()
+    at = head.find(b"\ncontent-length:")
+    if at < 0:
+        return True
+    value = head[at + 16:]
+    nl = value.find(b"\r")
+    try:
+        length = int(value if nl < 0 else value[:nl])
+    except ValueError:
+        length = 0
+    return len(buf) - (end + 4) >= length
 
 
 class TunnelStream:
@@ -59,24 +131,27 @@ class TunnelStream:
     a LAN socket — only the methods those modules actually call are needed:
     recv/send/write/setblocking/settimeout/close.
 
-    Reads never block. The relay buffers a whole request (or a whole WebSocket
-    frame) and then sends OP_FLUSH, so by the time a handler runs, everything it
-    needs to read is already in `_in`. That is what keeps this single-threaded
-    design free of re-entrancy: a handler never has to pump the tunnel socket
-    from inside itself.
+    Reads never block: the tunnel buffers a whole request (or a whole WebSocket
+    frame) before it runs a handler, so everything the handler wants to read is
+    already in `_in`. That is what keeps this single-threaded design free of
+    re-entrancy.
     """
 
     pollable = False        # tells _register_ws not to put this in select.poll
 
-    def __init__(self, tunnel, sid):
+    def __init__(self, tunnel, sid, credit, peer=b"tunnel"):
         self._tunnel = tunnel
         self.sid = sid
+        self.peer = peer
         self._in = bytearray()
         self._out = bytearray()
+        # Bytes we may still send before the server acks. See "Flow control" in
+        # docs/TUNNEL_PROTOCOL.md.
+        self.credit = credit
         self.closed = False
         self.upgraded = False       # became a WebSocket via the 101 handshake
 
-    # ---- inbound (relay -> handler) -------------------------------------
+    # ---- inbound (server -> handler) -------------------------------------
     def _feed(self, data):
         self._in.extend(data)
 
@@ -85,33 +160,39 @@ class TunnelStream:
             return b""              # reads as EOF, which is what we want
         take = min(n, len(self._in))
         chunk = bytes(self._in[:take])
-        del self._in[:take]
+        # Reslice rather than `del buf[:n]` — MicroPython's bytearray has no
+        # item deletion at all. Same everywhere else a buffer is consumed.
+        self._in = self._in[take:]
         return chunk
 
-    # ---- outbound (handler -> relay) ------------------------------------
+    # ---- outbound (handler -> server) ------------------------------------
     def send(self, data):
         """
-        Buffer bytes for the relay. Returns the count "sent", as
+        Buffer bytes for the server. Returns the count "sent", as
         static_files.write_all() expects — we always accept everything, so no
         short-write loop is needed here.
         """
         if self.closed:
             return len(data)
         self._out.extend(data)
-        while len(self._out) >= _OUT_FLUSH_AT:
-            self._emit(_OUT_FLUSH_AT)
+        while len(self._out) >= _OUT_CHUNK and self.credit > 0:
+            self._emit(_OUT_CHUNK)
         return len(data)
 
     write = send                    # some callers use write() instead
 
     def _emit(self, count):
         chunk = bytes(self._out[:count])
-        del self._out[:count]
-        self._tunnel._send_frame(OP_DATA, self.sid, chunk)
+        self._out = self._out[count:]
+        self.credit -= count
+        self._tunnel._send(_stream(STREAM_DATA, self.sid, chunk))
 
     def flush(self):
-        while self._out:
-            self._emit(min(MAX_PAYLOAD, len(self._out)))
+        while self._out and self.credit > 0:
+            self._emit(min(_OUT_CHUNK, len(self._out)))
+
+    def add_credit(self, granted):
+        self.credit += granted
 
     # ---- socket API the handlers call but we don't need ------------------
     def setblocking(self, flag):
@@ -125,12 +206,12 @@ class TunnelStream:
             return
         self.flush()
         self.closed = True
-        self._tunnel._stream_closed(self.sid, notify=True)
+        self._tunnel._stream_gone(self.sid, eof=True)
 
 
 class Tunnel:
     """
-    Owns the single outbound connection and demultiplexes streams on it.
+    Owns the single outbound WebSocket and demultiplexes streams on it.
 
     The webserver drives this: it registers `sock` with its poller, calls
     service() once per loop pass, and handle_readable() when the socket has
@@ -138,21 +219,41 @@ class Tunnel:
     one place.
     """
 
-    def __init__(self, cfg_tunnel, device_ip=""):
+    def __init__(self, cfg_tunnel, device_ip="", local_port=80):
         self.cfg = cfg_tunnel
         self.device_ip = device_ip
+        self.local_port = local_port
         self.sock = None
         self.state = _IDLE
         self.streams = {}
-        self._rx = bytearray()
+        self.tunnel_id = ""         # set by TUNNEL_OK; the routing key
+        self.public_url = ""
+        self.window = 65536         # until HELLO_OK tells us the real one
+        self._rx = bytearray()      # socket bytes -> WebSocket frames
+        self._msg = bytearray()     # WebSocket fragments -> one uptunnel frame
+        self._tx = bytearray()      # frames waiting for the socket to take them
+        self._pending = b""         # the exact bytes a blocked write must retry
         self._next_attempt_ms = 0
         self._backoff_ms = cfg_tunnel["reconnect_min_ms"]
         self._last_rx_ms = 0
         self._last_ping_ms = 0
+        self._auth_since_ms = 0
         # Set once the tunnel has given up for this boot (see _after_failure).
         # Nothing clears it but a restart, so the event loop stops paying the
         # blocking-connect cost entirely.
         self.disabled = False
+
+        try:
+            self.host, self.port, self.path, self.tls = _parse_url(cfg_tunnel["server"])
+        except ValueError as e:
+            print("tunnel: %s — tunnel disabled" % e)
+            self.host = self.path = ""
+            self.port = 0
+            self.tls = False
+            self.disabled = True
+        if not cfg_tunnel.get("subdomain"):
+            print("tunnel: no subdomain configured — tunnel disabled")
+            self.disabled = True
 
     # ---- status ---------------------------------------------------------
     @property
@@ -175,12 +276,24 @@ class Tunnel:
                 return False
             return self._connect(now_ms)
 
-        # Keepalive: probe periodically, and give up if the relay goes quiet.
+        self._drain()
+        if self.sock is None:                   # _drain tore it down
+            return True
+
+        if self.state == _AUTH:
+            if time.ticks_diff(now_ms, self._auth_since_ms) >= self.cfg["connect_timeout_ms"]:
+                self._disconnect(now_ms, "no HELLO_OK from the server")
+                return True
+            return False
+
+        # Keepalive: probe periodically, and give up if the server goes quiet.
+        # Both ends ping; ours is what notices a black-holed link promptly,
+        # where TCP alone would sit there for minutes.
         if time.ticks_diff(now_ms, self._last_ping_ms) >= self.cfg["keepalive_ms"]:
             self._last_ping_ms = now_ms
-            self._send_frame(OP_PING, 0)
+            self._push(ws_client.encode(b"", ws.OP_PING))
         if time.ticks_diff(now_ms, self._last_rx_ms) >= self.cfg["idle_timeout_ms"]:
-            self._disconnect(now_ms, "relay went silent")
+            self._disconnect(now_ms, "server went silent")
             return True
 
         for st in list(self.streams.values()):
@@ -188,26 +301,26 @@ class Tunnel:
         return False
 
     def _connect(self, now_ms):
-        host = self.cfg["host"]
-        port = self.cfg["port"]
-        # NOTE: this connect (and the TLS handshake below) is BLOCKING. It can
-        # stall the event loop for up to connect_timeout_ms, during which the
-        # LED pattern freezes. That is the accepted tradeoff for MicroPython —
-        # a non-blocking TLS handshake is not reliably supported. Backoff keeps
-        # the stall rare when the relay is down.
-        print("tunnel: connecting to %s:%d" % (host, port))
+        # NOTE: this connect, the TLS handshake and the WebSocket handshake are
+        # all BLOCKING. They can stall the event loop for up to
+        # connect_timeout_ms, during which the LED pattern freezes and the
+        # momentary-hold deadman in server/pins.py is delayed by the same
+        # amount. That is the accepted tradeoff for MicroPython — a non-blocking
+        # TLS handshake is not reliably supported. Backoff keeps the stall rare
+        # when the server is down.
+        print("tunnel: connecting to %s" % self.cfg["server"])
         s = None
         try:
             # NOTE: getaddrinfo() is NOT covered by settimeout below, so a DNS
             # name that fails to resolve can stall longer than
-            # connect_timeout_ms. Use a literal IP in `host` to bound it.
-            addr = socket.getaddrinfo(host, port)[0][-1]
+            # connect_timeout_ms.
+            addr = socket.getaddrinfo(self.host, self.port)[0][-1]
             s = socket.socket()
             s.settimeout(self.cfg["connect_timeout_ms"] / 1000)
             s.connect(addr)
-            if self.cfg["use_tls"]:
-                s = self._wrap_tls(s, host)
-            self._handshake(s)
+            if self.tls:
+                s = self._wrap_tls(s)
+            ws_client.open_handshake(s, self.host, self.path)
             s.setblocking(False)
         except Exception as e:
             if s is not None:
@@ -219,67 +332,46 @@ class Tunnel:
             return False
 
         self.sock = s
-        self.state = _UP
+        self.state = _AUTH
+        self.streams = {}
+        self.tunnel_id = ""
+        self.public_url = ""
         self._rx = bytearray()
+        self._msg = bytearray()
+        self._tx = bytearray()
+        self._pending = b""
         self._last_rx_ms = now_ms
         self._last_ping_ms = now_ms
-        self._backoff_ms = self.cfg["reconnect_min_ms"]
-        print("tunnel: up")
+        self._auth_since_ms = now_ms
+        self._send(_control(HELLO, {
+            "version": PROTOCOL_VERSION,
+            "token": self.cfg["token"],
+            "name": self.cfg.get("name") or "pico",
+            "client": CLIENT_ID,
+        }))
         return True
 
-    def _wrap_tls(self, s, host):
+    def _wrap_tls(self, s):
         import ssl
         # MicroPython's ssl defaults to CERT_NONE: this gives confidentiality,
         # NOT proof you reached the right server. The HELLO token is what
         # actually authenticates the device. See docs/TUNNEL_PROTOCOL.md.
-        name = self.cfg["server_name"] or host
         try:
-            return ssl.wrap_socket(s, server_hostname=name)
+            return ssl.wrap_socket(s, server_hostname=self.host)
         except TypeError:
             return ssl.wrap_socket(s)      # older builds lack server_hostname
-
-    def _handshake(self, s):
-        """Send OP_HELLO and require OP_READY before carrying any traffic."""
-        import json
-        hello = json.dumps({
-            "token": self.cfg["token"],
-            "device_id": self.cfg["device_id"],
-            "lan_ip": self.device_ip,
-            "proto": 1,
-        }).encode()
-        s.write(_pack(OP_HELLO, 0, hello))
-        # Blocking read of exactly one frame; settimeout() still applies here.
-        hdr = self._read_exact(s, HEADER_LEN)
-        op = hdr[0]
-        length = (hdr[3] << 8) | hdr[4]
-        body = self._read_exact(s, length) if length else b""
-        if op != OP_READY:
-            raise OSError("relay rejected HELLO (op=0x%02x %s)" % (op, body))
-
-    @staticmethod
-    def _read_exact(s, n):
-        buf = bytearray()
-        while len(buf) < n:
-            chunk = s.read(n - len(buf))
-            if not chunk:
-                raise OSError("relay closed during handshake")
-            buf.extend(chunk)
-        return bytes(buf)
 
     def _after_failure(self, now_ms, why):
         """
         Decide whether to try again, honouring the startup_only setting.
 
-        With startup_only (the default) the tunnel gets exactly one chance per
-        boot: on failure it switches off for good, so a misconfigured or absent
-        relay costs the event loop one stall at startup instead of a recurring
-        one forever. The device carries on as a normal LAN device.
-
-        The tradeoff is operational: nothing reconnects on its own, so
-        restarting the relay leaves every device dark until it is power-cycled.
-        Set startup_only to false to get backoff-retry instead.
+        With startup_only the tunnel gets exactly one chance per boot: on
+        failure it switches off for good, so a misconfigured or absent server
+        costs the event loop one stall at startup instead of a recurring one
+        forever. The device carries on as a normal LAN device — and stays
+        unreachable from the internet until it is restarted.
         """
-        if self.cfg.get("startup_only", True):
+        if self.cfg.get("startup_only"):
             self.disabled = True
             print("tunnel: %s — startup_only is set, so the tunnel stays off "
                   "until this device restarts" % why)
@@ -299,122 +391,343 @@ class Tunnel:
                 pass
         self.sock = None
         self.state = _IDLE
+        self.public_url = ""
         self._rx = bytearray()
+        self._msg = bytearray()
+        self._tx = bytearray()
+        self._pending = b""
         if retry:
             self._after_failure(now_ms, why)
         else:
             self.disabled = True        # deliberate shutdown, not a failure
 
     # ---- frame I/O ------------------------------------------------------
-    def _send_frame(self, op, sid, payload=b""):
+    def _send(self, frame):
+        """Queue one uptunnel frame, wrapped in a binary WebSocket frame."""
+        self._push(ws_client.encode(frame))
+
+    def _queued(self):
+        """Bytes owed to the socket, whether snapshotted for retry or not."""
+        return len(self._pending) + len(self._tx)
+
+    def _push(self, data):
         if self.sock is None:
             return
-        try:
-            data = _pack(op, sid, payload)
-            mv = memoryview(data)
-            total = 0
-            while total < len(data):
-                sent = self.sock.write(mv[total:])
-                if sent:
-                    total += sent
-        except Exception as e:
-            self._disconnect(time.ticks_ms(), "write failed: %s" % e)
+        self._tx.extend(data)
+        self._drain()
+        if self._queued() <= _TX_HIGH_WATER:
+            return
+        # The queue is deeper than we are willing to hold, so stall the caller
+        # until the socket catches up — the same backpressure a blocking LAN
+        # socket applies inside static_files.write_all().
+        #
+        # The deadline measures time with NO progress, not total time spent
+        # here. A 78KB bundle through this device's TLS stack legitimately
+        # takes seconds of continuous stalling; only a socket that accepts
+        # nothing at all for _TX_STALL_MS is actually dead.
+        deadline = time.ticks_add(time.ticks_ms(), _TX_STALL_MS)
+        queued = self._queued()
+        while self.sock is not None and queued > _TX_HIGH_WATER:
+            if time.ticks_diff(time.ticks_ms(), deadline) > 0:
+                self._disconnect(time.ticks_ms(), "server stopped reading")
+                return
+            time.sleep_ms(2)
+            self._soak()
+            self._drain()
+            left = self._queued()
+            if left < queued:
+                deadline = time.ticks_add(time.ticks_ms(), _TX_STALL_MS)
+                queued = left
+
+    def _soak(self):
+        """
+        Take bytes off the socket without dispatching them.
+
+        Only called while a write is stalled, and it is what stops that stall
+        deadlocking. TLS is bidirectional: mbedtls has to consume an incoming
+        record — a session ticket or a key update arrives mid-transfer without
+        anyone asking — before it will accept another write, so a writer that
+        never reads eventually wedges for good. Leaving the receive window shut
+        also silences the server's acks.
+
+        Frames land in `_rx` and stay there for the event loop to dispatch.
+        Running a handler from inside another handler is exactly the
+        re-entrancy this design exists to avoid.
+        """
+        while self.sock is not None and len(self._rx) <= self.cfg["max_frame_bytes"]:
+            try:
+                chunk = self.sock.read(_READ_CHUNK)
+            except OSError:
+                return
+            if not chunk:
+                return              # nothing pending, or the peer went away
+            self._last_rx_ms = time.ticks_ms()
+            self._rx.extend(chunk)
+            if len(chunk) < _READ_CHUNK:
+                return
+
+    def _drain(self):
+        """
+        Push queued bytes at the socket, one snapshot at a time.
+
+        `_pending` is that snapshot, and it exists for one reason: when mbedtls
+        cannot take a write it reports WANT_WRITE, and the retry MUST offer the
+        *identical* buffer. Handing it a longer one — which is what happens if
+        you just re-offer a queue that other code has appended to since — leaves
+        it refusing forever, so the tail of a response is silently never sent.
+        Only a call that actually consumed bytes lets us move on.
+        """
+        while self.sock is not None:
+            if not self._pending:
+                if not self._tx:
+                    return
+                self._pending = bytes(self._tx)
+                self._tx = bytearray()
+            try:
+                sent = self.sock.write(self._pending)
+            except OSError as e:
+                if e.args[0] in _RETRY:
+                    return
+                self._disconnect(time.ticks_ms(), "write failed: %s" % e)
+                return
+            if not sent:
+                return                  # blocked: retry these same bytes later
+            self._pending = self._pending[sent:] if sent < len(self._pending) else b""
 
     def handle_readable(self, server):
-        """Drain the socket and dispatch every complete frame it yielded."""
-        if self.sock is None:
-            return
-        now = time.ticks_ms()
-        try:
-            chunk = self.sock.read(2048)
-        except OSError:
-            return                      # EAGAIN on a non-blocking socket
-        if chunk is None:
-            return
-        if not chunk:
-            self._disconnect(now, "relay closed the connection")
-            return
-
-        self._last_rx_ms = now
-        self._rx.extend(chunk)
-        while len(self._rx) >= HEADER_LEN:
-            length = (self._rx[3] << 8) | self._rx[4]
-            if length > MAX_PAYLOAD:
-                self._disconnect(now, "oversized frame (%d)" % length)
-                return
-            if len(self._rx) < HEADER_LEN + length:
-                break                   # rest of this frame hasn't arrived yet
-            op = self._rx[0]
-            sid = (self._rx[1] << 8) | self._rx[2]
-            payload = bytes(self._rx[HEADER_LEN:HEADER_LEN + length])
-            del self._rx[:HEADER_LEN + length]
-            self._dispatch(server, op, sid, payload)
-            if self.sock is None:
-                return                  # _dispatch tore the connection down
-
-    def _dispatch(self, server, op, sid, payload):
-        if op == OP_DATA:
-            st = self.streams.get(sid)
-            if st is not None:
-                st._feed(payload)
-            return
-
-        if op == OP_OPEN:
-            if len(self.streams) >= self.cfg["max_streams"]:
-                # Shed load rather than run out of RAM mid-response.
-                print("tunnel: stream limit reached; refusing %d" % sid)
-                self._send_frame(OP_CLOSE, sid)
-                return
-            self.streams[sid] = TunnelStream(self, sid)
-            return
-
-        if op == OP_FLUSH:
-            st = self.streams.get(sid)
-            if st is not None:
-                self._serve_stream(server, st, payload)
-            return
-
-        if op == OP_CLOSE:
-            self._stream_closed(sid, notify=False)
-            return
-
-        if op == OP_PING:
-            self._send_frame(OP_PONG, 0, payload)
-            return
-
-        if op == OP_PONG:
-            return
-
-        print("tunnel: unknown op 0x%02x" % op)
-
-    def _serve_stream(self, server, st, addr_hint):
         """
-        A complete unit arrived: either a whole HTTP request, or one WebSocket
-        frame on an already-upgraded stream. Either way it goes to the same
+        Drain the socket and dispatch every complete frame it yielded.
+
+        Reads until the socket is empty rather than once per poll wakeup: over
+        TLS, bytes can already be sitting decrypted inside the SSL layer with
+        nothing left on the TCP socket for poll() to report.
+        """
+        while self.sock is not None:
+            now = time.ticks_ms()
+            try:
+                chunk = self.sock.read(_READ_CHUNK)
+            except OSError as e:
+                if e.args[0] in _RETRY:
+                    return
+                self._disconnect(now, "read failed: %s" % e)
+                return
+            if chunk is None:
+                return                  # nothing more for now
+            if not chunk:
+                self._disconnect(now, "server closed the connection")
+                return
+
+            self._last_rx_ms = now
+            self._rx.extend(chunk)
+            self._consume(server, now)
+            if len(chunk) < _READ_CHUNK:
+                return                  # short read: the socket is drained
+
+    def _consume(self, server, now):
+        """Dispatch every whole WebSocket frame now sitting in `_rx`."""
+        while self.sock is not None:
+            total = ws.frame_len(self._rx)
+            if total < 0:
+                # Nothing complete yet. Bound what we will hold for one frame,
+                # so a huge inbound unit can't exhaust the heap.
+                if len(self._rx) > self.cfg["max_frame_bytes"]:
+                    self._disconnect(now, "inbound frame over max_frame_bytes")
+                return
+            frame = ws.parse_frame(self._rx)
+            self._rx = self._rx[total:]
+            self._on_ws_frame(server, frame, now)
+
+    def _on_ws_frame(self, server, frame, now):
+        fin, opcode, payload, _ = frame
+        if opcode == ws.OP_CLOSE:
+            self._disconnect(now, "server sent a WebSocket close")
+            return
+        if opcode == ws.OP_PING:
+            self._push(ws_client.encode(payload, ws.OP_PONG))
+            return
+        if opcode == ws.OP_PONG:
+            return                      # liveness already recorded by the read
+        if opcode == ws.OP_TEXT:
+            self._disconnect(now, "text frame (the protocol is binary-only)")
+            return
+
+        # OP_BINARY, or OP_CONT continuing one. Reassemble before dispatch.
+        if fin and not self._msg:
+            self._dispatch(server, payload)
+            return
+        self._msg.extend(payload)
+        if len(self._msg) > self.cfg["max_frame_bytes"]:
+            self._disconnect(now, "fragmented frame over max_frame_bytes")
+            return
+        if fin:
+            message = bytes(self._msg)
+            self._msg = bytearray()
+            self._dispatch(server, message)
+
+    # ---- uptunnel frames -------------------------------------------------
+    def _dispatch(self, server, frame):
+        if not frame:
+            return
+        frame_type = frame[0]
+        if frame_type < _STREAM_FLOOR:
+            try:
+                body = json.loads(frame[1:]) if len(frame) > 1 else {}
+            except ValueError:
+                print("tunnel: malformed JSON in frame 0x%02x" % frame_type)
+                return
+            self._on_control(frame_type, body)
+            return
+        if len(frame) < 5:
+            print("tunnel: stream frame 0x%02x is missing its id" % frame_type)
+            return
+        self._on_stream(server, frame_type, _u32(frame, 1), frame[5:])
+
+    def _on_control(self, frame_type, body):
+        if frame_type == HELLO_OK:
+            self.state = _UP
+            self.window = int(body.get("streamWindow", self.window))
+            print("tunnel: authenticated as %s (window %dKiB)"
+                  % (body.get("agentId", "?"), self.window // 1024))
+            self._send(_control(OPEN_TUNNEL, {
+                "reqId": "1",
+                "kind": "http",
+                "subdomain": self.cfg["subdomain"],
+                # Informational for the server — we are our own local target.
+                "target": {"host": self.device_ip or "127.0.0.1",
+                           "port": self.local_port},
+            }))
+            return
+
+        if frame_type == TUNNEL_OK:
+            self.tunnel_id = str(body.get("tunnelId", ""))
+            self.public_url = body.get("publicUrl", "")
+            print("tunnel: up at %s" % (self.public_url or self.tunnel_id))
+            return
+
+        if frame_type == ERROR:
+            code = body.get("code", "error")
+            print("tunnel: server refused: %s (%s)" % (body.get("message", ""), code))
+            # Retrying cannot fix credentials, so stop paying for the attempt.
+            if code in ("unauthorized", "bad_version"):
+                self._disconnect(time.ticks_ms(), code, retry=False)
+            elif not self.tunnel_id:
+                # The subdomain claim failed, so this session is authenticated
+                # but publicly dead — nothing will ever route to it. Drop it and
+                # come back on the backoff. The usual cause is a previous
+                # session of ours that the server has not reaped yet, which
+                # clears itself within a heartbeat or two.
+                self._disconnect(time.ticks_ms(), "%s (%s)" % (code, "no tunnel"))
+            return
+
+        print("tunnel: ignoring control frame 0x%02x" % frame_type)
+
+    def _on_stream(self, server, frame_type, sid, payload):
+        if frame_type == STREAM_OPEN:
+            self._open_stream(sid, payload)
+            return
+
+        st = self.streams.get(sid)
+        if st is None:
+            # The server may still be draining a stream we already tore down.
+            if frame_type != STREAM_RESET:
+                self._send(_stream(STREAM_RESET, sid,
+                                   json.dumps({"code": "unknown_stream"}).encode()))
+            return
+
+        if frame_type == STREAM_DATA:
+            st._feed(payload)
+            # We have taken the bytes, so credit them back straight away; the
+            # server pauses the public socket without this.
+            self._send(_stream(STREAM_ACK, sid, _u32b(len(payload))))
+            self._pump(server, st)
+        elif frame_type == STREAM_ACK:
+            if len(payload) >= 4:
+                st.add_credit(_u32(payload))
+                st.flush()
+        elif frame_type == STREAM_EOF:
+            # Half-close: the public client has said its piece. Anything still
+            # unparsed was an incomplete request, so there is nothing to serve.
+            if not st.upgraded:
+                self._finish(server, sid)
+        elif frame_type == STREAM_RESET:
+            self._finish(server, sid, eof=False)
+        else:
+            print("tunnel: ignoring stream frame 0x%02x" % frame_type)
+
+    def _open_stream(self, sid, payload):
+        try:
+            meta = json.loads(payload) if payload else {}
+        except ValueError:
+            meta = {}
+        if self.tunnel_id and str(meta.get("tunnelId", "")) != self.tunnel_id:
+            self._send(_stream(STREAM_RESET, sid,
+                               json.dumps({"code": "unknown_tunnel"}).encode()))
+            return
+        if len(self.streams) >= self.cfg["max_streams"]:
+            # Shed load rather than run out of RAM mid-response.
+            print("tunnel: stream limit reached; refusing %d" % sid)
+            self._send(_stream(STREAM_RESET, sid,
+                               json.dumps({"code": "too_many_streams"}).encode()))
+            return
+        peer = meta.get("remoteAddr", "tunnel")
+        self.streams[sid] = TunnelStream(self, sid, self.window, peer)
+
+    def _pump(self, server, st):
+        """
+        Run every complete unit sitting in the stream's buffer.
+
+        Before the WebSocket upgrade a unit is one whole HTTP request; after it,
+        one whole client WebSocket frame. Either way it goes to the same
         webserver handler a LAN client would hit.
         """
-        try:
+        while not st.closed:
             if st.upgraded:
-                server._handle_ws(st)
+                if ws.frame_len(st._in) < 0:
+                    return
+                try:
+                    server._handle_ws(st)
+                except Exception as e:
+                    print("tunnel: stream %d ws failed: %s" % (st.sid, e))
+                    self._finish(server, st.sid)
+                    return
             else:
-                server._serve(st, addr_hint or b"tunnel")
-        except Exception as e:
-            print("tunnel: stream %d failed: %s" % (st.sid, e))
-            try:
-                st.close()
-            except Exception:
-                pass
-            return
-        st.flush()
+                if not _request_complete(st._in):
+                    return
+                try:
+                    server._serve(st, st.peer)
+                except Exception as e:
+                    print("tunnel: stream %d failed: %s" % (st.sid, e))
+                    self._finish(server, st.sid)
+                    return
+                st.flush()
 
-    def _stream_closed(self, sid, notify):
-        st = self.streams.pop(sid, None)
+    def _finish(self, server, sid, eof=True):
+        """Tear a stream down, telling the webserver if it had adopted it."""
+        st = self.streams.get(sid)
         if st is None:
             return
+        if st.upgraded and not st.closed:
+            # Registered as a WebSocket client: the webserver has to forget it
+            # too, or it keeps broadcasting into a dead stream forever.
+            st.closed = True
+            self.streams.pop(sid, None)
+            server._drop_ws(st)
+            if eof:
+                self._send(_stream(STREAM_EOF, sid))
+            return
         st.closed = True
-        if notify:
-            self._send_frame(OP_CLOSE, sid)
+        self._stream_gone(sid, eof)
+
+    def _stream_gone(self, sid, eof):
+        if self.streams.pop(sid, None) is None:
+            return
+        if eof and self.sock is not None:
+            self._send(_stream(STREAM_EOF, sid))
 
     def shutdown(self):
         if self.sock is not None:
+            try:
+                self._push(ws_client.encode(b"\x03\xe9", ws.OP_CLOSE))   # 1001
+            except Exception:
+                pass
             self._disconnect(time.ticks_ms(), "shutting down", retry=False)

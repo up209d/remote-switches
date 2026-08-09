@@ -6,6 +6,7 @@ import json
 from server import state
 from server import static_files
 from server import ws_protocol as ws
+from server.http_client import ask_gemini
 from server.metrics import get_pico_state
 from server.pins import read_pins, apply_pin_command, tick_pins
 from server.tunnel import Tunnel
@@ -25,6 +26,9 @@ class PicoServer:
       - WebSocket  /ws/health -> live stats + LED state, pushed periodically
       - GET        /health    -> same snapshot as a one-shot JSON response
       - POST       /blink      -> LED / blink control (traditional request)
+      - POST       /ask-gemini -> Http request to Gemini API, return JSON response
+      - POST       /pin        -> GPIO pin control (traditional request)
+      - GET        /          -> SPA index.html
       - static web app files from www/
 
     Single-threaded, non-blocking accept loop; LED blinking keeps ticking
@@ -43,8 +47,8 @@ class PicoServer:
         # Optional outbound reverse tunnel, so the device is reachable from the
         # internet through NAT. Off unless settings.json enables it.
         self.tunnel = None
-        if config.TUNNEL.get("enabled") and config.TUNNEL.get("host"):
-            self.tunnel = Tunnel(config.TUNNEL, ip)
+        if config.TUNNEL.get("enabled") and config.TUNNEL.get("server"):
+            self.tunnel = Tunnel(config.TUNNEL, ip, config.HTTP_PORT)
 
         self.server = socket.socket()
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -249,6 +253,8 @@ class PicoServer:
                 self._send_json(conn, snap)
             elif route == "/api/blink" and method == "POST":
                 self._handle_blink(conn, body)
+            elif route == "/api/ask-gemini" and method == "POST":
+                self._handle_ask_gemini(conn, body, headers)
             elif route == "/api/pin" and method == "POST":
                 self._handle_pin(conn, body)
             elif route.startswith("/api/"):
@@ -282,6 +288,29 @@ class PicoServer:
         self._broadcast(self._ws_payload())
         state.save(self.led)
 
+    def _handle_ask_gemini(self, conn, body, headers):
+        try:
+            print("Received /api/ask-gemini request with body:", body)
+            msg = json.loads(body.decode('utf-8', 'ignore')) if body else {}
+        except Exception:
+            self._send_json(conn, {"error": "invalid json"}, status="400 Bad Request")
+            return
+        # Validate authorization header, api key should be base64 of the device name
+        if 'authorization' not in headers or headers['authorization'] != f"Bearer pico-basic-api-key-improve-later":
+            self._send_json(conn, {"error": "unauthorized"}, status="401 Unauthorized")
+            return
+        # Validate that the prompt is present and is a string
+        max_tokens = msg.get("maxTokens")
+        print(f"Received maxTokens: {max_tokens}, type: {type(max_tokens)}")
+        if not max_tokens or not isinstance(max_tokens, int) or max_tokens <= 0 or max_tokens > 5000:
+            self._send_json(conn, {"error": "invalid maxTokens 0 - 5000"}, status="400 Bad Request")
+            return
+        prompt = msg.get("prompt")
+        if not prompt or not isinstance(prompt, str):
+            self._send_json(conn, {"error": "no prompt"}, status="400 Bad Request")
+            return
+        self._send_json(conn, ask_gemini(prompt, max_tokens,self.cfg.GEMINI_API_KEY))
+
     def _handle_pin(self, conn, body):
         try:
             msg = json.loads(body.decode('utf-8', 'ignore')) if body else {}
@@ -295,7 +324,6 @@ class PicoServer:
             return
         self._send_json(conn, {"status": "ok", "pins": read_pins()})
         self._broadcast(self._ws_payload())
-        state.save(self.led)
 
     # ---- main loop ------------------------------------------------------
     def run(self):

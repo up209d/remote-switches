@@ -21,6 +21,19 @@ SECRET_KEYS = {
     "WIFI_PASS": "wifi_pass",
 }
 
+# .env variable -> key inside the "tunnel" object. All three have to be present
+# for a tunnel to mean anything, so the tunnel is enabled only when they are.
+TUNNEL_KEYS = {
+    "UPTUNNEL_SERVER": "server",
+    "UPTUNNEL_TOKEN": "token",
+    "UPTUNNEL_SUBDOMAIN": "subdomain",
+}
+
+
+# .env variable -> key inside the "gemini" object
+GEMINI_KEYS = {
+    "GEMINI_API_KEY": "gemini_api_key",
+}
 
 def read_env(path):
     """Parse KEY=VALUE lines. No shell expansion, so $ in a password is safe."""
@@ -54,8 +67,26 @@ def main():
         if env.get(var):
             settings[key] = env[var]
 
+    for var, key in GEMINI_KEYS.items():
+        if env.get(var):
+            settings[key] = env[var]
+
     if not settings.get("wifi_ssid"):
         sys.exit("build_settings: WIFI_SSID is not set — copy .env.example to .env")
+
+    tunnel = settings.setdefault("tunnel", {})
+    for var, key in TUNNEL_KEYS.items():
+        if env.get(var):
+            tunnel[key] = env[var]
+    present = [var for var in TUNNEL_KEYS if env.get(var)]
+    if len(present) == len(TUNNEL_KEYS):
+        tunnel["enabled"] = True
+        print("build_settings: tunnel enabled -> %s (%s)"
+              % (tunnel["subdomain"], tunnel["server"]))
+    elif present:
+        missing = ", ".join(v for v in TUNNEL_KEYS if v not in present)
+        sys.exit("build_settings: tunnel needs all of UPTUNNEL_SERVER, "
+                 "UPTUNNEL_TOKEN and UPTUNNEL_SUBDOMAIN — missing %s" % missing)
 
     with open(sys.argv[1], "w") as f:
         json.dump(settings, f)

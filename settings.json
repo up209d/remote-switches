@@ -16,18 +16,19 @@
 
   "tunnel": {
     "enabled": false,
-    "host": "",
-    "port": 7443,
-    "use_tls": true,
-    "server_name": "",
+    "server": "",
     "token": "",
-    "device_id": "",
-    "startup_only": true,
+    "subdomain": "",
+    "name": "",
+    "startup_only": false,
     "connect_timeout_ms": 8000,
     "reconnect_min_ms": 2000,
     "reconnect_max_ms": 60000,
     "keepalive_ms": 20000,
     "idle_timeout_ms": 60000,
-    "max_streams": 6
-  }
+    "max_streams": 6,
+    "max_frame_bytes": 32768
+  },
+
+  "gemini_api_key": ""
 }
