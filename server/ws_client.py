@@ -50,7 +50,9 @@ def encode(payload, opcode=ws.OP_BINARY):
 def open_handshake(sock, host, path):
     """
     Send the opening handshake and verify the 101 reply. Raises OSError if the
-    server refuses or answers with something that isn't a WebSocket.
+    server refuses or answers with something that isn't a WebSocket — the
+    reason travels in the exception and Tunnel._connect writes it to
+    tunnel.log, so nothing is logged twice here.
 
     Runs on a *blocking* socket: this is part of connect, before the tunnel
     switches the socket to non-blocking for the event loop.

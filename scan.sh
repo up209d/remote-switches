@@ -8,6 +8,8 @@
 #   - Normal mode:   a serial port with USB VID:PID 2e8a:xxxx (Raspberry Pi)
 #   - BOOTSEL mode:  a mass-storage volume named RPI-RP2 / RP2350 (no serial)
 
+CURRENT_DEVICE_ID=
+
 set -uo pipefail
 cd "$(dirname "$0")"
 

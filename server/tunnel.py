@@ -29,6 +29,7 @@ import time
 
 from server import ws_client
 from server import ws_protocol as ws
+from server.tunnel_log import log
 
 PROTOCOL_VERSION = 1
 CLIENT_ID = "uptunnel-pico/1"
@@ -246,13 +247,13 @@ class Tunnel:
         try:
             self.host, self.port, self.path, self.tls = _parse_url(cfg_tunnel["server"])
         except ValueError as e:
-            print("tunnel: %s — tunnel disabled" % e)
+            log("tunnel: %s — tunnel disabled" % e)
             self.host = self.path = ""
             self.port = 0
             self.tls = False
             self.disabled = True
         if not cfg_tunnel.get("subdomain"):
-            print("tunnel: no subdomain configured — tunnel disabled")
+            log("tunnel: no subdomain configured — tunnel disabled")
             self.disabled = True
 
     # ---- status ---------------------------------------------------------
@@ -308,7 +309,7 @@ class Tunnel:
         # amount. That is the accepted tradeoff for MicroPython — a non-blocking
         # TLS handshake is not reliably supported. Backoff keeps the stall rare
         # when the server is down.
-        print("tunnel: connecting to %s" % self.cfg["server"])
+        log("tunnel: connecting to %s" % self.cfg["server"])
         s = None
         try:
             # NOTE: getaddrinfo() is NOT covered by settimeout below, so a DNS
@@ -373,11 +374,11 @@ class Tunnel:
         """
         if self.cfg.get("startup_only"):
             self.disabled = True
-            print("tunnel: %s — startup_only is set, so the tunnel stays off "
-                  "until this device restarts" % why)
+            log("tunnel: %s — startup_only is set, so the tunnel stays off "
+                "until this device restarts" % why)
             return
         self._next_attempt_ms = time.ticks_add(now_ms, self._backoff_ms)
-        print("tunnel: %s — retrying in %dms" % (why, self._backoff_ms))
+        log("tunnel: %s — retrying in %dms" % (why, self._backoff_ms))
         self._backoff_ms = min(self._backoff_ms * 2, self.cfg["reconnect_max_ms"])
 
     def _disconnect(self, now_ms, why="connection lost", retry=True):
@@ -573,12 +574,12 @@ class Tunnel:
             try:
                 body = json.loads(frame[1:]) if len(frame) > 1 else {}
             except ValueError:
-                print("tunnel: malformed JSON in frame 0x%02x" % frame_type)
+                log("tunnel: malformed JSON in frame 0x%02x" % frame_type)
                 return
             self._on_control(frame_type, body)
             return
         if len(frame) < 5:
-            print("tunnel: stream frame 0x%02x is missing its id" % frame_type)
+            log("tunnel: stream frame 0x%02x is missing its id" % frame_type)
             return
         self._on_stream(server, frame_type, _u32(frame, 1), frame[5:])
 
@@ -586,8 +587,8 @@ class Tunnel:
         if frame_type == HELLO_OK:
             self.state = _UP
             self.window = int(body.get("streamWindow", self.window))
-            print("tunnel: authenticated as %s (window %dKiB)"
-                  % (body.get("agentId", "?"), self.window // 1024))
+            log("tunnel: authenticated as %s (window %dKiB)"
+                % (body.get("agentId", "?"), self.window // 1024))
             self._send(_control(OPEN_TUNNEL, {
                 "reqId": "1",
                 "kind": "http",
@@ -601,12 +602,12 @@ class Tunnel:
         if frame_type == TUNNEL_OK:
             self.tunnel_id = str(body.get("tunnelId", ""))
             self.public_url = body.get("publicUrl", "")
-            print("tunnel: up at %s" % (self.public_url or self.tunnel_id))
+            log("tunnel: up at %s" % (self.public_url or self.tunnel_id))
             return
 
         if frame_type == ERROR:
             code = body.get("code", "error")
-            print("tunnel: server refused: %s (%s)" % (body.get("message", ""), code))
+            log("tunnel: server refused: %s (%s)" % (body.get("message", ""), code))
             # Retrying cannot fix credentials, so stop paying for the attempt.
             if code in ("unauthorized", "bad_version"):
                 self._disconnect(time.ticks_ms(), code, retry=False)
@@ -619,7 +620,7 @@ class Tunnel:
                 self._disconnect(time.ticks_ms(), "%s (%s)" % (code, "no tunnel"))
             return
 
-        print("tunnel: ignoring control frame 0x%02x" % frame_type)
+        log("tunnel: ignoring control frame 0x%02x" % frame_type)
 
     def _on_stream(self, server, frame_type, sid, payload):
         if frame_type == STREAM_OPEN:
@@ -652,7 +653,7 @@ class Tunnel:
         elif frame_type == STREAM_RESET:
             self._finish(server, sid, eof=False)
         else:
-            print("tunnel: ignoring stream frame 0x%02x" % frame_type)
+            log("tunnel: ignoring stream frame 0x%02x" % frame_type)
 
     def _open_stream(self, sid, payload):
         try:
@@ -665,7 +666,7 @@ class Tunnel:
             return
         if len(self.streams) >= self.cfg["max_streams"]:
             # Shed load rather than run out of RAM mid-response.
-            print("tunnel: stream limit reached; refusing %d" % sid)
+            log("tunnel: stream limit reached; refusing %d" % sid)
             self._send(_stream(STREAM_RESET, sid,
                                json.dumps({"code": "too_many_streams"}).encode()))
             return
@@ -687,7 +688,7 @@ class Tunnel:
                 try:
                     server._handle_ws(st)
                 except Exception as e:
-                    print("tunnel: stream %d ws failed: %s" % (st.sid, e))
+                    log("tunnel: stream %d ws failed: %s" % (st.sid, e))
                     self._finish(server, st.sid)
                     return
             else:
@@ -696,7 +697,7 @@ class Tunnel:
                 try:
                     server._serve(st, st.peer)
                 except Exception as e:
-                    print("tunnel: stream %d failed: %s" % (st.sid, e))
+                    log("tunnel: stream %d failed: %s" % (st.sid, e))
                     self._finish(server, st.sid)
                     return
                 st.flush()

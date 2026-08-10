@@ -39,12 +39,15 @@ trap 'rm -f "$BUILD_SETTINGS"' EXIT
 python3 tools/build_settings.py "$BUILD_SETTINGS"
 
 if [ "${DIRTY:-0}" != "1" ]; then
-    echo "==> Cleaning old files on the device (server/, www/, state.json)"
+    echo "==> Cleaning old files on the device (server/, www/, state.json, tunnel.log)"
     $MP $CONNECT fs rm -r :server >/dev/null 2>&1 || true
     $MP $CONNECT fs rm -r :www    >/dev/null 2>&1 || true
     # Runtime state (LED pattern, GPIO outputs) is deliberately reset by a new
     # version; DIRTY=1 keeps it so the device resumes across an incremental push.
     $MP $CONNECT fs rm :state.json >/dev/null 2>&1 || true
+    # Same for the tunnel connection log: a new version starts with a clean one.
+    $MP $CONNECT fs rm :tunnel.log >/dev/null 2>&1 || true
+    $MP $CONNECT fs rm :tunnel.log.tmp >/dev/null 2>&1 || true
 fi
 
 echo "==> [2/3] Uploading to the Pico (unchanged files are skipped)"

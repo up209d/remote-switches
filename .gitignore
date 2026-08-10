@@ -6,6 +6,8 @@ www/
 
 # Runtime state written by the device itself
 state.json
+tunnel.log
+tunnel.log.tmp
 
 # Node
 node_modules/
