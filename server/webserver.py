@@ -3,15 +3,33 @@ import select
 import time
 import json
 
+from server import logs
 from server import state
 from server import static_files
+from server import timesync
+from server import watchdog
+from server import wifi_conn
 from server import ws_protocol as ws
 from server.http_client import ask_gemini
 from server.metrics import get_pico_state
 from server.pins import read_pins, apply_pin_command, tick_pins
 from server.tunnel import Tunnel
+from server.tunnel_log import log as tlog
 
 WS_PATH = "/api/ws/health"
+
+def _query(path):
+    """Parse `?a=1&b=2` off a request path. No percent-decoding — the only
+    values we take are log filenames and a line count."""
+    out = {}
+    _, _, qs = path.partition("?")
+    for part in qs.split("&"):
+        if not part:
+            continue
+        k, _, v = part.partition("=")
+        out[k] = v
+    return out
+
 
 CORS_HEADERS = (
     "Access-Control-Allow-Origin: *\r\n"
@@ -28,6 +46,8 @@ class PicoServer:
       - POST       /blink      -> LED / blink control (traditional request)
       - POST       /ask-gemini -> Http request to Gemini API, return JSON response
       - POST       /pin        -> GPIO pin control (traditional request)
+      - GET        /logs       -> JSON list of the device's *.log files
+      - GET        /logs/tail  -> text/plain tail of one of them
       - GET        /          -> SPA index.html
       - static web app files from www/
 
@@ -65,6 +85,7 @@ class PicoServer:
             "stats": get_pico_state(self.wlan, self.ip),
             "led": self.led.state(),
             "pins": read_pins(),
+            "tunnel": self.tunnel.snapshot() if self.tunnel is not None else None,
         }
 
     def _ws_payload(self):
@@ -121,7 +142,15 @@ class PicoServer:
     # ---- tunnel plumbing ------------------------------------------------
     def _service_tunnel(self, sock):
         """Drain the tunnel socket; drop it from the poller if it died."""
-        self.tunnel.handle_readable(self)
+        # Anything the dispatch path raises has to end in a teardown, not just a
+        # logged line: leaving `sock` registered while the tunnel keeps its own
+        # reference is what lets a live-but-useless connection sit there for
+        # hours with the idle watchdog never reached.
+        try:
+            self.tunnel.handle_readable(self)
+        except Exception as e:
+            tlog("tunnel: read error: %s: %s" % (type(e).__name__, e))
+            self.tunnel.fail(time.ticks_ms(), "read error")
         if self.tunnel.sock is not sock:
             self._repoll_tunnel(sock)
 
@@ -139,17 +168,20 @@ class PicoServer:
             self.poller.register(self.tunnel.sock, select.POLLIN)
 
     # ---- HTTP responses -------------------------------------------------
-    def _send(self, conn, status, content_type, body, extra=""):
-        if isinstance(body, str):
-            body = body.encode()
+    def _send_head(self, conn, status, content_type, length, extra=""):
         static_files.write_all(conn, (
             "HTTP/1.1 %s\r\n"
             "Content-Type: %s\r\n"
             "%s"
             "%s"
             "Connection: close\r\n"
-            "Content-Length: %d\r\n\r\n" % (status, content_type, CORS_HEADERS, extra, len(body))
+            "Content-Length: %d\r\n\r\n" % (status, content_type, CORS_HEADERS, extra, length)
         ))
+
+    def _send(self, conn, status, content_type, body, extra=""):
+        if isinstance(body, str):
+            body = body.encode()
+        self._send_head(conn, status, content_type, len(body), extra)
         if body:
             static_files.write_all(conn, body)
 
@@ -257,6 +289,10 @@ class PicoServer:
                 self._handle_ask_gemini(conn, body, headers)
             elif route == "/api/pin" and method == "POST":
                 self._handle_pin(conn, body)
+            elif route == "/api/logs" and method == "GET":
+                self._send_json(conn, {"status": "ok", "files": logs.listing()})
+            elif route == "/api/logs/tail" and method == "GET":
+                self._handle_log_tail(conn, path)
             elif route.startswith("/api/"):
                 # Unknown API route: don't fall through to the SPA.
                 self._send_json(conn, {"error": "not found"}, status="404 Not Found")
@@ -311,6 +347,30 @@ class PicoServer:
             return
         self._send_json(conn, ask_gemini(prompt, max_tokens,self.cfg.GEMINI_API_KEY))
 
+    def _handle_log_tail(self, conn, path):
+        """
+        GET /api/logs/tail?name=tunnel.log&lines=200
+
+        Streamed rather than buffered: the log can be 175KB and the response
+        goes out chunk by chunk, so the body never lands on the heap.
+        """
+        query = _query(path)
+        name = query.get("name", "")
+        try:
+            lines = int(query.get("lines", ""))
+        except ValueError:
+            lines = logs.DEFAULT_LINES
+        lines = max(1, min(lines, logs.MAX_LINES))
+
+        span = logs.tail_span(name, lines)
+        if span is None:
+            self._send_json(conn, {"error": "no such log"}, status="404 Not Found")
+            return
+        start, length = span
+        self._send_head(conn, "200 OK", "text/plain; charset=utf-8", length,
+                        "Cache-Control: no-store\r\n")
+        logs.stream(conn, name, start, length)
+
     def _handle_pin(self, conn, body):
         try:
             msg = json.loads(body.decode('utf-8', 'ignore')) if body else {}
@@ -328,8 +388,13 @@ class PicoServer:
     # ---- main loop ------------------------------------------------------
     def run(self):
         print("Web server ready. Open http://%s/" % self.ip)
-        self._last_stats_ms = time.ticks_ms()
+        now = time.ticks_ms()
+        self._last_stats_ms = now
+        self._wifi_lost_ms = 0
+        watchdog.start(self.cfg.WATCHDOG, now)
+        timesync.sync(now)
         while True:
+            healthy = False
             try:
                 events = self.poller.poll(self.cfg.POLL_TIMEOUT_MS)
                 for sock, _flag in events:
@@ -362,15 +427,77 @@ class PicoServer:
                 # whenever service() reports a change.
                 if self.tunnel is not None:
                     was = self.tunnel.sock
-                    if self.tunnel.service(self, now) or was is not self.tunnel.sock:
+                    try:
+                        changed = self.tunnel.service(self, now)
+                    except Exception as e:
+                        # Same reasoning as _service_tunnel: force the teardown
+                        # so the next pass starts from a known state instead of
+                        # re-raising on the same wedged socket forever.
+                        tlog("tunnel: service error: %s: %s" % (type(e).__name__, e))
+                        self.tunnel.fail(now, "service error")
+                        changed = True
+                    if changed or was is not self.tunnel.sock:
                         self._repoll_tunnel(was)
+
+                self._check_wifi(now)
+                timesync.sync(now)
+                healthy = True
 
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                print("Loop error:", e)
+                # tunnel_log, not print: a bare print goes to a serial console
+                # nobody is watching and is gone after a reboot, which is why a
+                # wedged loop used to leave no trace at all.
+                tlog("loop error: %s: %s" % (type(e).__name__, e))
+            # Outside the try so it runs on the failure path too — that is the
+            # whole point: a loop where every pass throws stops being fed and
+            # gets rebooted, where a loop that hangs outright is caught by the
+            # hardware timer instead.
+            watchdog.feed(time.ticks_ms(), healthy)
 
         self.shutdown()
+
+    def _check_wifi(self, now):
+        """
+        Reassociate if the link dropped, and reboot if that fails.
+
+        Wi-Fi was previously established once at boot and never looked at again,
+        so an AP restart left the device with a dead LAN server and a tunnel
+        that could only fail to connect, forever.
+        """
+        if self.wlan.isconnected():
+            self._wifi_lost_ms = 0
+            ip = self.wlan.ifconfig()[0]
+            if ip != self.ip:
+                self.ip = ip
+                tlog("wifi: address changed to %s" % ip)
+            if self.tunnel is not None:
+                # Re-reported on the next HELLO, so the server's log tracks a
+                # DHCP change on a board nobody can read a screen on.
+                self.tunnel.device_ip = ip
+            return
+
+        if not self._wifi_lost_ms:
+            self._wifi_lost_ms = now
+            tlog("wifi: association lost")
+            return
+        if time.ticks_diff(now, self._wifi_lost_ms) < self.cfg.WIFI_GRACE_MS:
+            return                      # a brief roam; give it time to come back
+
+        tlog("wifi: down for %dms — reconnecting" % self.cfg.WIFI_GRACE_MS)
+        self._wifi_lost_ms = now
+        try:
+            self.wlan, self.ip = wifi_conn.connect(
+                self.cfg.WIFI_SSID, self.cfg.WIFI_PASS, self.cfg.WIFI_TIMEOUT_S,
+                wifi_conn.static_config(self.cfg),
+            )
+        except Exception as e:
+            tlog("wifi: reconnect failed (%s) — rebooting" % e)
+            import machine
+            machine.reset()
+        tlog("wifi: back at %s" % self.ip)
+        self._wifi_lost_ms = 0
 
     def shutdown(self):
         for conn in list(self.clients.values()):

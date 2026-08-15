@@ -56,3 +56,22 @@ export function postBlink(host, command) {
 export function postPin(host, command) {
   return postJson('/api/pin', host, command)
 }
+
+async function get(path, host) {
+  const url = apiUrl(path, host)
+  if (!url) throw new Error('No Pico address set')
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Request failed: ${res.status}`)
+  return res
+}
+
+// The device's log files (tunnel.log & friends) -> {status, files:[{name,size}]}.
+export async function fetchLogs(host) {
+  return (await get('/api/logs', host)).json()
+}
+
+// Last `lines` lines of one log, as plain text (the device streams it).
+export async function fetchLogTail(host, name, lines) {
+  const path = `/api/logs/tail?name=${encodeURIComponent(name)}&lines=${lines}`
+  return (await get(path, host)).text()
+}

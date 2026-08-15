@@ -43,7 +43,7 @@ type >= 0x20  stream frame:   bytes 1..5  = streamId (u32, big-endian)
 
 | Type | Name | Direction | Payload |
 |------|------|-----------|---------|
-| `0x01` | HELLO | device → server | JSON: version, token, name, client |
+| `0x01` | HELLO | device → server | JSON: version, token, name, client, lanIp?, lanPort? |
 | `0x02` | HELLO_OK | server → device | JSON: agentId, heartbeatMs, streamWindow, httpDomain |
 | `0x03` | ERROR | both | JSON: code, message, optional reqId |
 | `0x10` | OPEN_TUNNEL | device → server | JSON: reqId, kind, subdomain, target |
@@ -71,8 +71,11 @@ one. Change that constant and restore the XOR loop in `encode()` together.
 ## 2. Handshake
 
 1. Device opens the WebSocket and sends `HELLO` with `token`, `name` and
-   `version: 1`. Bad credentials get an `ERROR` (`unauthorized` / `bad_version`)
-   and a close — the device **stops retrying**, because retrying cannot help.
+   `version: 1`, plus the optional `lanIp` / `lanPort` (see below). Bad
+   credentials get an `ERROR` and a close. `bad_version` is terminal — the
+   device stops retrying, because only new firmware can fix it. `unauthorized`
+   is **not**: the device backs off to `reconnect_max_ms` and keeps trying (see
+   §8 for why).
 2. Server replies `HELLO_OK` with `streamWindow`, the per-stream credit.
 3. Device sends one `OPEN_TUNNEL` claiming `tunnel.subdomain` as an HTTP tunnel.
 4. Server replies `TUNNEL_OK` with `publicUrl`, which the device prints.
@@ -86,6 +89,18 @@ backoff rather than sitting there looking connected.
 `settings.json` can go to a whole fleet and each board is still tellable apart
 in the server's logs. It is **not** the routing key — `subdomain` is, and the
 server's token entry decides which subdomains a token may claim.
+
+### `lanIp` / `lanPort` in HELLO
+
+Both optional, both purely informational, and the server must never route or
+authenticate on them. They exist because the device is headless: when it is
+reachable only through the tunnel, nothing tells you what address DHCP gave it
+on its own network. The device sends what it currently believes its LAN address
+to be, refreshed on every reconnect, and the server records it in its log and
+exposes it on `GET /status`.
+
+They are agent-supplied, so the server treats them as untrusted display strings:
+length-capped, stripped of control characters, and never fed into routing.
 
 ## 3. When a handler runs
 
@@ -214,8 +229,43 @@ That switch is `Tunnel.disabled`, and it is **deliberately not persisted** to
 gave up must come back with a clean slate on the next boot. Do not "fix" this by
 adding it to `server/state.py`.
 
-Authentication failures set `disabled` regardless of `startup_only`, since a bad
-token cannot be fixed by trying again.
+`bad_version` sets `disabled` regardless of `startup_only`: a protocol mismatch
+needs a new binary on one side, so retrying genuinely cannot help.
+
+`unauthorized` deliberately does **not**. It looks like a permanent credential
+failure but usually is not: a relay restarted before its token file loaded, a
+rolled-back deploy, or another service briefly answering on the hostname all
+produce it. A device that switched itself off for those would need a physical
+power cycle to come back, which defeats the point of remote access. Instead it
+pins the backoff at `reconnect_max_ms` and keeps trying — slow enough to cost
+nothing, and it self-heals when the server does.
+
+### Proving the session is alive
+
+Three separate checks, because each catches something the others miss
+(`Tunnel._check_liveness`):
+
+- **Bytes received** — nothing at all for `idle_timeout_ms` means the socket is
+  dead. Catches a black-holed link, where TCP alone would sit there for minutes.
+- **Pong received** — the device pings every `keepalive_ms` with a sequenced
+  payload and requires an answer within `idle_timeout_ms`. Bytes arriving only
+  prove the socket works; a pong proves the *server* is still processing us.
+- **`tunnel_id` present** — proof the public side can still route here. A
+  session can be authenticated and healthy on the wire while nothing in the
+  world can reach it; that is the "device says connected, URL returns 502" case,
+  and only this check sees it.
+
+All three run **before** the write path, so a `_drain()` that throws on every
+pass can never suppress them. And a session that holds for `healthy_ms` resets
+the backoff to `reconnect_min_ms`, so one rough patch does not cost 60-second
+recovery for the rest of the boot.
+
+### Nothing here is persisted
+
+`disabled`, the backoff, the liveness timestamps and the watchdog counters are
+all per-session by design and are **deliberately not written** to `state.json` —
+a device that gave up must come back with a clean slate on the next boot. Do not
+"fix" this by adding them to `server/state.py`.
 
 ## 9. What the device expects of the server
 
@@ -226,8 +276,14 @@ token cannot be fixed by trying again.
 4. Forward browser WebSocket frames verbatim and masked.
 5. Copy device→server `STREAM_DATA` straight to the public socket, and end that
    socket on `STREAM_EOF`.
-6. Ping on the heartbeat; the device answers with a pong and pings on its own
-   schedule so a dead uplink is noticed within `idle_timeout_ms`.
-7. Honour `max_streams` (default 6) — the device refuses excess streams with
+6. Ping on the heartbeat, and **answer the device's own pings with a pong** —
+   the device now drops a session that stops answering, so a server that ignores
+   client pings will be reconnected to every `idle_timeout_ms`.
+7. Tolerate more than one missed pong before terminating the agent
+   (`HEARTBEAT_MISSES`, default 2), and count inbound frames and client pings as
+   liveness. Terminating on a single missed control frame frees the subdomain
+   while the device — which gets no RST back through a black-holed NAT — still
+   believes it is connected, which surfaces as an unexplained 502.
+8. Honour `max_streams` (default 6) — the device refuses excess streams with
    `STREAM_RESET {"code": "too_many_streams"}`, which the server should turn
    into a 502 rather than hanging the browser.

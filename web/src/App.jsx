@@ -39,7 +39,7 @@ export default function App() {
   return (
     <div className="app-bg text-body">
       {view === 'settings' ? (
-        <SettingsView appearance={appearance} set={set} onBack={() => setView('dash')} />
+        <SettingsView appearance={appearance} set={set} host={host} onBack={() => setView('dash')} />
       ) : (
         <div className="mx-auto max-w-3xl px-4 py-8 sm:py-12">
           {/* Header */}

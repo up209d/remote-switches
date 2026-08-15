@@ -15,6 +15,19 @@ _DEFAULTS = {
     "stats_interval_ms": 1000,   # how often stats are pushed to WS clients
     "poll_timeout_ms": 50,       # event-loop poll granularity
     "wifi_timeout_s": 15,        # Wi-Fi connect timeout
+    # Wi-Fi is only established once, at boot. If the association is lost for
+    # longer than this the device reconnects, and reboots if that fails.
+    "wifi_grace_ms": 30000,
+    # ---- last-resort recovery -------------------------------------------
+    # The RP2 hardware watchdog counter tops out around 8.3s, so the reboot
+    # trigger is two-stage: the hardware WDT catches a true hang within its own
+    # ceiling, and stall_timeout_ms below catches the slower failure the
+    # hardware cannot see — a loop that keeps running, and keeps feeding the
+    # WDT, while every pass throws. Merged key-by-key like "tunnel".
+    "watchdog": {
+        "enabled": True,
+        "stall_timeout_ms": 60000,
+    },
     # Static IP. Leave static_ip empty ("") to use DHCP. When set, the Pico
     # claims this fixed address instead of a DHCP-assigned one. gateway/dns
     # may be left empty to auto-derive (x.x.x.1 / gateway).
@@ -77,9 +90,23 @@ _DEFAULTS = {
         "reconnect_min_ms": 2000,
         "reconnect_max_ms": 60000,
         # Send a WebSocket ping this often; drop and reconnect after this long
-        # with no traffic at all from the server.
+        # with no traffic at all from the server, or with no answer to our own
+        # pings. The two are separate tests: bytes arriving proves the socket
+        # works, a pong proves the server is still processing us.
         "keepalive_ms": 20000,
         "idle_timeout_ms": 60000,
+        # Hold a session this long and the reconnect backoff drops back to
+        # reconnect_min_ms. Without it the backoff only ever grows, so a device
+        # that had one rough patch keeps paying 60s recovery for the rest of the
+        # boot.
+        "healthy_ms": 60000,
+        # While connected, write one "tunnel: ok ..." line to tunnel.log this
+        # often. The point is the gaps: with a regular heartbeat on record,
+        # silence in the log means the loop stopped rather than that all was
+        # well. 0 turns it off.
+        "log_heartbeat_ms": 300000,
+        # Ceiling on tunnel.log itself; a trim leaves the newest 80%.
+        "log_max_lines": 1000,
         # Concurrent tunnelled client streams. Each costs RAM for its buffers,
         # so this is the knob that stops a busy page load exhausting the heap.
         "max_streams": 6,
@@ -108,13 +135,16 @@ def _load():
             print("config: settings.json is not valid JSON; using defaults")
             break
         if isinstance(user, dict):
-            # "tunnel" is a nested object, so merge it key-by-key — a plain
+            # These are nested objects, so merge them key-by-key — a plain
             # update() would drop every default the user didn't restate.
-            user_tunnel = user.pop("tunnel", None)
+            nested = {}
+            for key in ("tunnel", "watchdog"):
+                nested[key] = user.pop(key, None)
             values.update(user)
-            if isinstance(user_tunnel, dict):
-                values["tunnel"] = dict(_DEFAULTS["tunnel"])
-                values["tunnel"].update(user_tunnel)
+            for key, sub in nested.items():
+                if isinstance(sub, dict):
+                    values[key] = dict(_DEFAULTS[key])
+                    values[key].update(sub)
         else:
             print("config: settings.json must be a JSON object; using defaults")
         break
@@ -149,6 +179,8 @@ HTTP_PORT = _cfg["http_port"]
 STATS_INTERVAL_MS = _cfg["stats_interval_ms"]
 POLL_TIMEOUT_MS = _cfg["poll_timeout_ms"]
 WIFI_TIMEOUT_S = _cfg["wifi_timeout_s"]
+WIFI_GRACE_MS = _cfg["wifi_grace_ms"]
+WATCHDOG = _cfg["watchdog"]
 STATIC_IP = _cfg["static_ip"]
 SUBNET_MASK = _cfg["subnet_mask"]
 GATEWAY = _cfg["gateway"]

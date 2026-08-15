@@ -5,6 +5,7 @@
   "stats_interval_ms": 1000,
   "poll_timeout_ms": 50,
   "wifi_timeout_s": 15,
+  "wifi_grace_ms": 30000,
   "static_ip": "",
   "subnet_mask": "255.255.255.0",
   "gateway": "",
@@ -26,8 +27,16 @@
     "reconnect_max_ms": 60000,
     "keepalive_ms": 20000,
     "idle_timeout_ms": 60000,
+    "healthy_ms": 60000,
+    "log_heartbeat_ms": 300000,
+    "log_max_lines": 1000,
     "max_streams": 6,
     "max_frame_bytes": 32768
+  },
+
+  "watchdog": {
+    "enabled": true,
+    "stall_timeout_ms": 60000
   },
 
   "gemini_api_key": ""

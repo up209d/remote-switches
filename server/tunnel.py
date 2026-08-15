@@ -27,6 +27,7 @@ import json
 import socket
 import time
 
+from server import watchdog
 from server import ws_client
 from server import ws_protocol as ws
 from server.tunnel_log import log
@@ -238,7 +239,11 @@ class Tunnel:
         self._backoff_ms = cfg_tunnel["reconnect_min_ms"]
         self._last_rx_ms = 0
         self._last_ping_ms = 0
+        self._last_pong_ms = 0      # answers to *our* pings, not just any byte
+        self._ping_seq = 0
         self._auth_since_ms = 0
+        self._up_since_ms = 0       # set by TUNNEL_OK; drives the backoff reset
+        self._last_hb_log_ms = 0
         # Set once the tunnel has given up for this boot (see _after_failure).
         # Nothing clears it but a restart, so the event loop stops paying the
         # blocking-connect cost entirely.
@@ -264,7 +269,40 @@ class Tunnel:
     def owns(self, sock):
         return self.sock is not None and sock is self.sock
 
+    def snapshot(self):
+        """
+        Tunnel health for /api/health and the stats WebSocket.
+
+        Reported over the LAN on purpose: when the public URL 502s, this is what
+        tells you whether the device thinks it is connected — which is the whole
+        difference between "the relay dropped us" and "we never noticed".
+
+        Not persisted. Every field here is per-session by design; see
+        docs/TUNNEL_PROTOCOL.md §8.
+        """
+        now = time.ticks_ms()
+        return {
+            "connected": self.state == _UP and bool(self.tunnel_id),
+            "public_url": self.public_url,
+            "lan_ip": self.device_ip,
+            "disabled": self.disabled,
+            "backoff_ms": self._backoff_ms,
+            "up_ms": time.ticks_diff(now, self._up_since_ms) if self._up_since_ms else 0,
+            "since_pong_ms": time.ticks_diff(now, self._last_pong_ms) if self.sock else -1,
+        }
+
     # ---- connect / disconnect -------------------------------------------
+    def fail(self, now_ms, why):
+        """
+        Tear the connection down from outside, for a reason the tunnel itself
+        did not detect. The webserver calls this when servicing us raised: the
+        socket has to go, or the poller and this object disagree about what is
+        live and the connection sits there forever.
+        """
+        if self.sock is None:
+            return
+        self._disconnect(now_ms, why)
+
     def service(self, server, now_ms):
         """
         Called once per event-loop pass: connect if due, keepalive, flush.
@@ -277,28 +315,86 @@ class Tunnel:
                 return False
             return self._connect(now_ms)
 
-        self._drain()
-        if self.sock is None:                   # _drain tore it down
-            return True
-
         if self.state == _AUTH:
             if time.ticks_diff(now_ms, self._auth_since_ms) >= self.cfg["connect_timeout_ms"]:
                 self._disconnect(now_ms, "no HELLO_OK from the server")
                 return True
-            return False
+            self._drain()
+            return self.sock is None
 
+        # Liveness first, before anything that can raise or block. _drain() used
+        # to run ahead of these checks, which meant a drain that threw on every
+        # pass kept the connection nominally alive forever.
+        if self._check_liveness(now_ms):
+            return True
+
+        self._drain()
+        if self.sock is None:                   # _drain tore it down
+            return True
+
+        for st in list(self.streams.values()):
+            st.flush()
+        return False
+
+    def _check_liveness(self, now_ms):
+        """
+        Decide whether this connection is still worth keeping. Returns True if
+        it was torn down.
+
+        Three separate tests, because each catches something the others miss:
+        bytes arriving proves the socket works, a pong proves the *server* is
+        still processing us, and a tunnel id proves the public side can still
+        route to us. A session can pass the first and fail the other two — that
+        is the 502-with-a-happy-device case.
+        """
         # Keepalive: probe periodically, and give up if the server goes quiet.
         # Both ends ping; ours is what notices a black-holed link promptly,
         # where TCP alone would sit there for minutes.
         if time.ticks_diff(now_ms, self._last_ping_ms) >= self.cfg["keepalive_ms"]:
             self._last_ping_ms = now_ms
-            self._push(ws_client.encode(b"", ws.OP_PING))
+            self._ping_seq = (self._ping_seq + 1) & 0xFFFFFFFF
+            # A sequenced payload comes back in the pong, so the round trip is
+            # measurable and an old pong cannot vouch for a new ping.
+            self._push(ws_client.encode(_u32b(self._ping_seq), ws.OP_PING))
+            if self.sock is None:
+                return True         # _push gave up on a socket that stopped reading
+
         if time.ticks_diff(now_ms, self._last_rx_ms) >= self.cfg["idle_timeout_ms"]:
             self._disconnect(now_ms, "server went silent")
             return True
 
-        for st in list(self.streams.values()):
-            st.flush()
+        if time.ticks_diff(now_ms, self._last_pong_ms) >= self.cfg["idle_timeout_ms"]:
+            self._disconnect(now_ms, "server stopped answering pings")
+            return True
+
+        # Authenticated but never routable: OPEN_TUNNEL went out when HELLO_OK
+        # landed and TUNNEL_OK never came back. Nothing can reach us, so the
+        # session is worthless however healthy the socket looks.
+        if not self.tunnel_id:
+            if time.ticks_diff(now_ms, self._auth_since_ms) >= self.cfg["connect_timeout_ms"]:
+                self._disconnect(now_ms, "no TUNNEL_OK from the server")
+                return True
+            return False
+
+        # Past here the session is genuinely up.
+        if (self._backoff_ms != self.cfg["reconnect_min_ms"]
+                and time.ticks_diff(now_ms, self._up_since_ms) >= self.cfg["healthy_ms"]):
+            # Earned it: a session that has held for healthy_ms is evidence the
+            # trouble has passed, so the next blip retries promptly instead of
+            # inheriting a backoff that only ever grew.
+            self._backoff_ms = self.cfg["reconnect_min_ms"]
+            log("tunnel: session healthy — reconnect backoff reset to %dms"
+                % self._backoff_ms)
+
+        hb = self.cfg["log_heartbeat_ms"]
+        if hb and time.ticks_diff(now_ms, self._last_hb_log_ms) >= hb:
+            self._last_hb_log_ms = now_ms
+            # Written down on an interval so a gap in tunnel.log is itself
+            # evidence: silence now means the loop stopped, not that all was well.
+            log("tunnel: ok up=%ds pong=%dms streams=%d"
+                % (time.ticks_diff(now_ms, self._up_since_ms) // 1000,
+                   time.ticks_diff(now_ms, self._last_pong_ms),
+                   len(self.streams)))
         return False
 
     def _connect(self, now_ms):
@@ -312,16 +408,25 @@ class Tunnel:
         log("tunnel: connecting to %s" % self.cfg["server"])
         s = None
         try:
+            # Each step here can outlast the hardware watchdog's 8.4s ceiling on
+            # its own, so the timer is fed between them. A hang *inside* one
+            # step still reboots the board, which for an unbounded DNS lookup is
+            # the outcome we want.
+            watchdog.pet()
             # NOTE: getaddrinfo() is NOT covered by settimeout below, so a DNS
             # name that fails to resolve can stall longer than
             # connect_timeout_ms.
             addr = socket.getaddrinfo(self.host, self.port)[0][-1]
+            watchdog.pet()
             s = socket.socket()
             s.settimeout(self.cfg["connect_timeout_ms"] / 1000)
             s.connect(addr)
+            watchdog.pet()
             if self.tls:
                 s = self._wrap_tls(s)
+                watchdog.pet()
             ws_client.open_handshake(s, self.host, self.path)
+            watchdog.pet()
             s.setblocking(False)
         except Exception as e:
             if s is not None:
@@ -343,12 +448,18 @@ class Tunnel:
         self._pending = b""
         self._last_rx_ms = now_ms
         self._last_ping_ms = now_ms
+        self._last_pong_ms = now_ms
         self._auth_since_ms = now_ms
+        self._last_hb_log_ms = now_ms
         self._send(_control(HELLO, {
             "version": PROTOCOL_VERSION,
             "token": self.cfg["token"],
             "name": self.cfg.get("name") or "pico",
             "client": CLIENT_ID,
+            # The board is headless, so its DHCP address is otherwise
+            # unknowable. The server logs these; it never routes on them.
+            "lanIp": self.device_ip,
+            "lanPort": self.local_port,
         }))
         return True
 
@@ -393,6 +504,9 @@ class Tunnel:
         self.sock = None
         self.state = _IDLE
         self.public_url = ""
+        # Cleared here as well as in _connect: a stale id left behind would make
+        # the next session look routable before TUNNEL_OK had arrived.
+        self.tunnel_id = ""
         self._rx = bytearray()
         self._msg = bytearray()
         self._tx = bytearray()
@@ -401,6 +515,7 @@ class Tunnel:
             self._after_failure(now_ms, why)
         else:
             self.disabled = True        # deliberate shutdown, not a failure
+            log("tunnel: %s — off until this device restarts" % why)
 
     # ---- frame I/O ------------------------------------------------------
     def _send(self, frame):
@@ -547,7 +662,10 @@ class Tunnel:
             self._push(ws_client.encode(payload, ws.OP_PONG))
             return
         if opcode == ws.OP_PONG:
-            return                      # liveness already recorded by the read
+            # Distinct from _last_rx_ms: this is the server proving it still
+            # reads and answers us, not merely that bytes reached the socket.
+            self._last_pong_ms = now
+            return
         if opcode == ws.OP_TEXT:
             self._disconnect(now, "text frame (the protocol is binary-only)")
             return
@@ -602,22 +720,35 @@ class Tunnel:
         if frame_type == TUNNEL_OK:
             self.tunnel_id = str(body.get("tunnelId", ""))
             self.public_url = body.get("publicUrl", "")
+            self._up_since_ms = time.ticks_ms()
+            self._last_hb_log_ms = self._up_since_ms
             log("tunnel: up at %s" % (self.public_url or self.tunnel_id))
             return
 
         if frame_type == ERROR:
             code = body.get("code", "error")
+            now = time.ticks_ms()
             log("tunnel: server refused: %s (%s)" % (body.get("message", ""), code))
-            # Retrying cannot fix credentials, so stop paying for the attempt.
-            if code in ("unauthorized", "bad_version"):
-                self._disconnect(time.ticks_ms(), code, retry=False)
-            elif not self.tunnel_id:
-                # The subdomain claim failed, so this session is authenticated
-                # but publicly dead — nothing will ever route to it. Drop it and
-                # come back on the backoff. The usual cause is a previous
-                # session of ours that the server has not reaped yet, which
-                # clears itself within a heartbeat or two.
-                self._disconnect(time.ticks_ms(), "%s (%s)" % (code, "no tunnel"))
+            if code == "bad_version":
+                # A protocol mismatch is genuinely unfixable by retrying: the
+                # binary on either side has to change first.
+                self._disconnect(now, code, retry=False)
+                return
+            if code == "unauthorized":
+                # Deliberately NOT permanent. A relay restarted before its token
+                # file loaded, a rolled-back deploy, or another service briefly
+                # answering on the hostname all produce this — and a device that
+                # switches itself off for the boot then needs a physical power
+                # cycle. Retry at the ceiling: slow enough to cost nothing, and
+                # it self-heals when the server does.
+                self._disconnect(now, code)
+                self._backoff_ms = self.cfg["reconnect_max_ms"]
+                self._next_attempt_ms = time.ticks_add(now, self._backoff_ms)
+                return
+            # Anything else: drop and come back on the backoff. This used to be
+            # ignored once tunnel_id was set, which left the device sitting in a
+            # session the public side could no longer route to.
+            self._disconnect(now, code)
             return
 
         log("tunnel: ignoring control frame 0x%02x" % frame_type)

@@ -1,8 +1,9 @@
 import { MODES, SCHEMES, PATTERNS } from '../lib/appearance'
+import LogsSection from './LogsSection'
 
 // Full-screen appearance page (mobile-first): a back button returns to the
 // dashboard. Changes apply live, so the page itself recolours as you pick.
-export default function SettingsView({ appearance, set, onBack }) {
+export default function SettingsView({ appearance, set, host, onBack }) {
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 sm:py-8">
       <header className="mb-8 flex items-center gap-3">
@@ -17,7 +18,7 @@ export default function SettingsView({ appearance, set, onBack }) {
         </button>
         <div>
           <h1 className="text-xl font-bold text-strong">Settings</h1>
-          <p className="text-sm text-muted">Appearance</p>
+          <p className="text-sm text-muted">Appearance &amp; logs</p>
         </div>
       </header>
 
@@ -94,9 +95,19 @@ export default function SettingsView({ appearance, set, onBack }) {
             </div>
           ))}
         </Group>
+
+        {/* Log files */}
+        <Group
+          title="Log files"
+          hint="Read straight off the device's flash. Newest lines last; the log is capped, so old lines are trimmed away."
+        >
+          <LogsSection host={host} />
+        </Group>
       </div>
 
-      <p className="mt-10 text-center text-xs text-faint">Your choices are saved on this device.</p>
+      <p className="mt-10 text-center text-xs text-faint">
+        Appearance choices are saved on this device.
+      </p>
     </div>
   )
 }

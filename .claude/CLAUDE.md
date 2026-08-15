@@ -104,9 +104,22 @@ a serial port with VID `2e8a`; in BOOTSEL mode = a `/Volumes/RP*` volume (no ser
 - `pipenv run upload` — upload only (no run).
 - `pipenv run repl` — open REPL / view serial output.
 
-**Keep the `resume` guidance from the skills:** the firmware runs an asyncio
-event loop, so use `mpremote ... resume ...` for fs/exec ops to avoid a soft
-reset that restarts the app.
+**IMPORTANT — every `mpremote` command kills the running app.** `resume` only
+skips the soft reset; entering the raw REPL still interrupts `main.py`. Verified:
+with `LAN=200 TUNNEL=200`, a single `mpremote resume exec "print('probe')"` gives
+`LAN=000 TUNNEL=502`. `fs ls` and `fs cat` do it too. So:
+- Never touch the board over USB during a soak test, or you will "discover" a
+  broken tunnel you caused yourself.
+- Diagnose over the network (`curl http://<ip>/api/health | jq .tunnel`), and
+  read the log over the network too — `curl 'http://<ip>/api/logs/tail?name=tunnel.log&lines=200'`
+  (`server/logs.py`), which leaves the app running. `mpremote fs cat` does not.
+- After any `mpremote` command, `pipenv run mpremote reset` to restart the app.
+
+Use `mpremote ... resume ...` anyway for fs/exec ops — it avoids the *soft reset*
+on connect, which is a separate and additional disruption.
+
+**`deploy.sh` deletes `tunnel.log`** unless `DIRTY=1`. Use `DIRTY=1 pipenv run
+deploy` whenever the log has to survive a redeploy.
 <!-- MicroPython Device Config END -->
 
 
@@ -143,6 +156,11 @@ Rules that fall out of this:
   runtime state that must NOT be persisted. Its whole purpose is to be cleared
   by a restart — see `docs/TUNNEL_PROTOCOL.md` §8. Don't "fix" it by adding it to
   `state.py`.
+- **Same exception, same reason:** the tunnel's liveness timestamps and backoff
+  (`_last_pong_ms`, `_backoff_ms`, `_up_since_ms`) and the watchdog's stall
+  counters (`server/watchdog.py`) are per-session by design. Persisting any of
+  them would carry a failed session's state into a fresh boot, which is the
+  opposite of what a reboot is for.
 <!-- Persisted State END -->
 
 
@@ -162,6 +180,8 @@ the Pico's whole `/api` surface:
 - GET `/api/health` → `{status, stats, led, pins}`
 - POST `/api/blink` → `{status, led}` (fixed | tick | morse)
 - POST `/api/pin` → `{status, pins}` (single or batch; ops arm/release/write/hold/pulse)
+- GET `/api/logs` → `{status, files:[{name,size}]}`
+- GET `/api/logs/tail?name=&lines=` → `text/plain` tail (a canned fake `tunnel.log`)
 
 **IMPORTANT — keep it in sync.** The mock is a *parallel implementation* of the
 firmware's response shapes and command handling (`server/webserver.py`,
