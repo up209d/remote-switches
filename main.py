@@ -31,6 +31,10 @@ def main():
         config.WIFI_SSID, config.WIFI_PASS, config.WIFI_TIMEOUT_S,
         wifi_conn.static_config(config),
     )
+    # The address is otherwise only ever printed to the serial console, so a log
+    # read back over HTTP could not say which LAN address that boot came up on.
+    # _check_wifi logs later changes; this is the starting point.
+    tunnel_log.log("wifi: connected, serving on http://%s:%d/" % (ip, config.HTTP_PORT))
     print("Dashboard:     http://%s/" % ip)
     print("Live stats WS: ws://%s/api/ws/health" % ip)
     print("GET  health:   http://%s/api/health" % ip)
